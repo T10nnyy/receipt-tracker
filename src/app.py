@@ -152,4 +152,6 @@ def main():
         st.error(f"Error loading statistics: {str(e)}")
 
 if __name__ == "__main__":
-    main()
+    port = int(os.environ.get("PORT", 8501))
+    sys.argv = ["streamlit", "run", "src/app.py", "--server.port", str(port), "--server.address", "0.0.0.0"]
+    sys.exit(stcli.main())
