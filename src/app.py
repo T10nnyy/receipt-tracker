@@ -13,6 +13,8 @@ import base64
 from PIL import Image
 import os
 import sys
+from streamlit.web import cli as stcli
+
 
 # Add the src directory to the Python path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
