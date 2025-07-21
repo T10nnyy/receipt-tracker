@@ -1,502 +1,399 @@
-"""
-Data Explorer Page - Receipt Management Interface
-
-This page provides comprehensive receipt data management capabilities including
-upload, search, filter, edit, and export functionality. Features an interactive
-table interface with advanced search capabilities and manual data correction tools.
-
-Author: Receipt Processing Team
-Version: 1.0.0
-"""
-
 import streamlit as st
 import pandas as pd
-import tempfile
-import os
+import plotly.express as px
 from datetime import datetime, timedelta
-from decimal import Decimal
-from typing import List, Optional
-import json
-
-# Import core modules
-import sys
-from pathlib import Path
-src_path = Path(__file__).parent.parent
-sys.path.insert(0, str(src_path))
+import logging
 
 from core.database import DatabaseManager
-from core.parsing import TextExtractor
-from core.algorithms import ReceiptAnalyzer, SearchFilters
-from core.models import Receipt, CategoryEnum, CurrencyEnum, ProcessingResult
-from ui.components import apply_custom_css, create_sidebar
+from core.algorithms import ReceiptAnalyzer
 
-# Configure page
+logger = logging.getLogger(__name__)
+
 st.set_page_config(
-    page_title="Data Explorer - Receipt Processing",
+    page_title="Data Explorer - Receipt Processor",
     page_icon="🔍",
     layout="wide"
 )
 
-def initialize_session_state():
-    """Initialize session state variables."""
-    if 'selected_receipts' not in st.session_state:
-        st.session_state.selected_receipts = []
-    if 'edit_mode' not in st.session_state:
-        st.session_state.edit_mode = False
-    if 'editing_receipt' not in st.session_state:
-        st.session_state.editing_receipt = None
-    if 'search_results' not in st.session_state:
-        st.session_state.search_results = []
+# Initialize components
+if 'db_manager' not in st.session_state:
+    st.session_state.db_manager = DatabaseManager()
+if 'analyzer' not in st.session_state:
+    st.session_state.analyzer = ReceiptAnalyzer()
 
-def upload_and_process_files():
-    """Handle file upload and processing."""
-    st.subheader("📤 Upload Receipts")
+def main():
+    st.title("🔍 Data Explorer")
+    st.markdown("Search, filter, and explore your receipt data")
     
-    uploaded_files = st.file_uploader(
-        "Choose receipt files",
-        type=['pdf', 'jpg', 'jpeg', 'png', 'tiff', 'bmp', 'txt'],
-        accept_multiple_files=True,
-        help="Supported formats: PDF, JPG, PNG, TIFF, BMP, TXT (max 10MB each)"
-    )
-    
-    if uploaded_files:
-        db_manager = DatabaseManager()
-        text_extractor = TextExtractor()
-        
-        # Process each uploaded file
-        for uploaded_file in uploaded_files:
-            with st.expander(f"Processing: {uploaded_file.name}", expanded=True):
-                # Create temporary file
-                with tempfile.NamedTemporaryFile(delete=False, suffix=Path(uploaded_file.name).suffix) as tmp_file:
-                    tmp_file.write(uploaded_file.getvalue())
-                    tmp_file_path = tmp_file.name
-                
-                try:
-                    # Show processing status
-                    with st.spinner(f"Processing {uploaded_file.name}..."):
-                        result = text_extractor.process_file(tmp_file_path, uploaded_file.name)
-                    
-                    if result.success and result.receipt:
-                        # Display extracted data for review
-                        col1, col2 = st.columns(2)
-                        
-                        with col1:
-                            st.success("✅ Processing successful!")
-                            st.metric("Confidence Score", f"{result.receipt.confidence_score:.1%}")
-                            st.metric("Processing Time", f"{result.processing_time:.2f}s")
-                        
-                        with col2:
-                            st.info("📋 Extracted Data")
-                            st.write(f"**Vendor:** {result.receipt.vendor}")
-                            st.write(f"**Date:** {result.receipt.transaction_date.strftime('%Y-%m-%d')}")
-                            st.write(f"**Amount:** {result.receipt.currency.value} {result.receipt.amount}")
-                            st.write(f"**Category:** {result.receipt.category.value.title()}")
-                        
-                        # Allow manual correction before saving
-                        if st.button(f"✏️ Edit Before Saving", key=f"edit_{uploaded_file.name}"):
-                            st.session_state.editing_receipt = result.receipt
-                            st.session_state.edit_mode = True
-                            st.rerun()
-                        
-                        # Save to database
-                        if st.button(f"💾 Save Receipt", key=f"save_{uploaded_file.name}", type="primary"):
-                            try:
-                                receipt_id = db_manager.add_receipt(result.receipt)
-                                st.success(f"Receipt saved with ID: {receipt_id}")
-                                st.balloons()
-                            except Exception as e:
-                                st.error(f"Failed to save receipt: {e}")
-                    
-                    else:
-                        st.error(f"❌ Processing failed: {result.error_message}")
-                        
-                        # Show extracted text for debugging
-                        if result.receipt and result.receipt.extracted_text:
-                            with st.expander("🔍 View Extracted Text"):
-                                st.text_area("Raw Text", result.receipt.extracted_text, height=200)
-                
-                finally:
-                    # Clean up temporary file
-                    os.unlink(tmp_file_path)
-
-def show_search_interface():
-    """Display advanced search and filter interface."""
-    st.subheader("🔍 Search & Filter")
-    
-    with st.expander("Search Options", expanded=True):
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            vendor_query = st.text_input("🏪 Vendor Name", placeholder="Enter vendor name...")
-            date_from = st.date_input("📅 From Date", value=None)
-            amount_min = st.number_input("💰 Min Amount", min_value=0.0, value=0.0, step=0.01)
-        
-        with col2:
-            category_filter = st.selectbox(
-                "🏷️ Category",
-                options=[None] + [cat.value for cat in CategoryEnum],
-                format_func=lambda x: "All Categories" if x is None else x.title()
-            )
-            date_to = st.date_input("📅 To Date", value=None)
-            amount_max = st.number_input("💰 Max Amount", min_value=0.0, value=10000.0, step=0.01)
-        
-        with col3:
-            currency_filter = st.selectbox(
-                "💱 Currency",
-                options=[None] + [curr.value for curr in CurrencyEnum],
-                format_func=lambda x: "All Currencies" if x is None else x
-            )
-            confidence_threshold = st.slider("🎯 Min Confidence", 0.0, 1.0, 0.0, 0.1)
-            fuzzy_search = st.checkbox("🔤 Fuzzy Search", help="Enable similar name matching")
-        
-        # Search button
-        if st.button("🔍 Search", type="primary"):
-            perform_search(
-                vendor_query, date_from, date_to, amount_min, amount_max,
-                category_filter, currency_filter, confidence_threshold, fuzzy_search
-            )
-
-def perform_search(vendor_query, date_from, date_to, amount_min, amount_max, 
-                  category_filter, currency_filter, confidence_threshold, fuzzy_search):
-    """Execute search with given parameters."""
     try:
-        db_manager = DatabaseManager()
-        analyzer = ReceiptAnalyzer()
+        receipts = st.session_state.db_manager.get_all_receipts()
         
-        # Get all receipts from database
-        all_receipts = db_manager.get_all_receipts()
+        if not receipts:
+            st.info("📝 No receipts found. Upload some receipts first!")
+            if st.button("Go to Upload Page"):
+                st.switch_page("src/app.py")
+            return
         
-        # Create search filters
-        filters = SearchFilters(
-            vendor_query=vendor_query if vendor_query else None,
-            date_from=datetime.combine(date_from, datetime.min.time()) if date_from else None,
-            date_to=datetime.combine(date_to, datetime.max.time()) if date_to else None,
-            amount_min=Decimal(str(amount_min)) if amount_min > 0 else None,
-            amount_max=Decimal(str(amount_max)) if amount_max < 10000 else None,
-            category=CategoryEnum(category_filter) if category_filter else None,
-            currency=CurrencyEnum(currency_filter) if currency_filter else None,
-            confidence_threshold=confidence_threshold,
-            fuzzy_search=fuzzy_search
-        )
+        # Sidebar filters
+        with st.sidebar:
+            st.header("🔧 Filters")
+            
+            # Search
+            search_query = st.text_input(
+                "🔍 Search",
+                placeholder="Enter merchant, item, or any text...",
+                help="Search across all receipt data"
+            )
+            
+            # Date range filter
+            st.subheader("📅 Date Range")
+            date_col1, date_col2 = st.columns(2)
+            
+            with date_col1:
+                start_date = st.date_input(
+                    "From",
+                    value=datetime.now() - timedelta(days=90),
+                    max_value=datetime.now()
+                )
+            
+            with date_col2:
+                end_date = st.date_input(
+                    "To",
+                    value=datetime.now(),
+                    max_value=datetime.now()
+                )
+            
+            # Amount range filter
+            st.subheader("💰 Amount Range")
+            max_amount = max(r.total_amount for r in receipts if r.total_amount) or 100.0
+            amount_range = st.slider(
+                "Amount ($)",
+                min_value=0.0,
+                max_value=float(max_amount),
+                value=(0.0, float(max_amount)),
+                step=0.01
+            )
+            
+            # Merchant filter
+            st.subheader("🏪 Merchant")
+            merchants = sorted(set(r.merchant_name for r in receipts if r.merchant_name))
+            selected_merchants = st.multiselect(
+                "Select merchants",
+                options=merchants,
+                default=[]
+            )
+            
+            # Category filter
+            st.subheader("📂 Category")
+            categories = sorted(set(r.category for r in receipts if r.category))
+            selected_categories = st.multiselect(
+                "Select categories",
+                options=categories,
+                default=[]
+            )
         
-        # Perform search
-        search_results = analyzer.search_receipts(all_receipts, filters)
-        st.session_state.search_results = search_results
+        # Apply filters
+        filtered_receipts = receipts.copy()
         
-        st.success(f"Found {len(search_results)} matching receipts")
+        # Search filter
+        if search_query:
+            filtered_receipts = st.session_state.analyzer.search_receipts(search_query, filtered_receipts)
         
-    except Exception as e:
-        st.error(f"Search failed: {e}")
-
-def display_receipts_table():
-    """Display interactive receipts table with selection and actions."""
-    st.subheader("📋 Receipt Data")
-    
-    # Get receipts to display
-    db_manager = DatabaseManager()
-    
-    if st.session_state.search_results:
-        receipts = st.session_state.search_results
-        st.info(f"Showing {len(receipts)} search results")
-    else:
-        receipts = db_manager.get_all_receipts()
-        st.info(f"Showing all {len(receipts)} receipts")
-    
-    if not receipts:
-        st.warning("No receipts found. Upload some receipts to get started!")
-        return
-    
-    # Convert to DataFrame for display
-    df_data = []
-    for receipt in receipts:
-        df_data.append({
-            'ID': receipt.id,
-            'Vendor': receipt.vendor,
-            'Date': receipt.transaction_date.strftime('%Y-%m-%d'),
-            'Amount': f"{receipt.currency.value} {receipt.amount}",
-            'Category': receipt.category.value.title(),
-            'Confidence': f"{receipt.confidence_score:.1%}",
-            'File': receipt.source_file
-        })
-    
-    df = pd.DataFrame(df_data)
-    
-    # Display table with selection
-    selected_indices = st.dataframe(
-        df,
-        use_container_width=True,
-        hide_index=True,
-        selection_mode="multi-index",
-        on_select="rerun"
-    )
-    
-    # Handle selection
-    if selected_indices and 'selection' in selected_indices:
-        selected_rows = selected_indices['selection']['rows']
-        st.session_state.selected_receipts = [receipts[i] for i in selected_rows]
-    
-    # Action buttons
-    if st.session_state.selected_receipts:
-        st.subheader("🛠️ Actions")
+        # Date filter
+        filtered_receipts = [
+            r for r in filtered_receipts
+            if r.receipt_date and start_date <= r.receipt_date.date() <= end_date
+        ]
+        
+        # Amount filter
+        filtered_receipts = [
+            r for r in filtered_receipts
+            if r.total_amount and amount_range[0] <= r.total_amount <= amount_range[1]
+        ]
+        
+        # Merchant filter
+        if selected_merchants:
+            filtered_receipts = [
+                r for r in filtered_receipts
+                if r.merchant_name in selected_merchants
+            ]
+        
+        # Category filter
+        if selected_categories:
+            filtered_receipts = [
+                r for r in filtered_receipts
+                if r.category in selected_categories
+            ]
+        
+        # Display results summary
         col1, col2, col3, col4 = st.columns(4)
         
         with col1:
-            if st.button("✏️ Edit Selected", disabled=len(st.session_state.selected_receipts) != 1):
-                if len(st.session_state.selected_receipts) == 1:
-                    st.session_state.editing_receipt = st.session_state.selected_receipts[0]
-                    st.session_state.edit_mode = True
-                    st.rerun()
+            st.metric("📊 Total Receipts", len(filtered_receipts))
         
         with col2:
-            if st.button("🗑️ Delete Selected", type="secondary"):
-                delete_selected_receipts()
+            total_amount = sum(r.total_amount for r in filtered_receipts if r.total_amount)
+            st.metric("💵 Total Amount", f"${total_amount:.2f}")
         
         with col3:
-            if st.button("📊 Analyze Selected"):
-                analyze_selected_receipts()
+            avg_amount = total_amount / len(filtered_receipts) if filtered_receipts else 0
+            st.metric("📈 Average Amount", f"${avg_amount:.2f}")
         
         with col4:
-            if st.button("📤 Export Selected"):
-                export_selected_receipts()
-
-def show_edit_interface():
-    """Display receipt editing interface."""
-    if not st.session_state.editing_receipt:
-        return
-    
-    receipt = st.session_state.editing_receipt
-    
-    st.subheader("✏️ Edit Receipt")
-    
-    with st.form("edit_receipt_form"):
-        col1, col2 = st.columns(2)
+            unique_merchants = len(set(r.merchant_name for r in filtered_receipts if r.merchant_name))
+            st.metric("🏪 Unique Merchants", unique_merchants)
         
-        with col1:
-            vendor = st.text_input("Vendor", value=receipt.vendor)
-            transaction_date = st.date_input("Date", value=receipt.transaction_date.date())
-            amount = st.number_input("Amount", value=float(receipt.amount), min_value=0.01, step=0.01)
+        if not filtered_receipts:
+            st.warning("🔍 No receipts match your current filters. Try adjusting your search criteria.")
+            return
         
-        with col2:
-            category = st.selectbox(
-                "Category",
-                options=[cat.value for cat in CategoryEnum],
-                index=list(CategoryEnum).index(receipt.category)
-            )
-            currency = st.selectbox(
-                "Currency",
-                options=[curr.value for curr in CurrencyEnum],
-                index=list(CurrencyEnum).index(receipt.currency)
-            )
-            confidence = st.slider("Confidence Score", 0.0, 1.0, receipt.confidence_score, 0.01)
-        
-        # Show original extracted text
-        with st.expander("📄 Original Extracted Text"):
-            st.text_area("Raw Text", receipt.extracted_text or "No text available", height=200, disabled=True)
-        
-        # Form buttons
+        # Display options
+        st.subheader("📋 Display Options")
         col1, col2, col3 = st.columns(3)
         
         with col1:
-            if st.form_submit_button("💾 Save Changes", type="primary"):
-                save_edited_receipt(receipt, vendor, transaction_date, amount, category, currency, confidence)
+            view_mode = st.selectbox(
+                "View Mode",
+                ["Table", "Cards", "Detailed"]
+            )
         
         with col2:
-            if st.form_submit_button("❌ Cancel"):
-                st.session_state.edit_mode = False
-                st.session_state.editing_receipt = None
-                st.rerun()
+            sort_by = st.selectbox(
+                "Sort By",
+                ["Date (Newest)", "Date (Oldest)", "Amount (High)", "Amount (Low)", "Merchant"]
+            )
         
         with col3:
-            if st.form_submit_button("🗑️ Delete Receipt", type="secondary"):
-                delete_receipt(receipt.id)
-
-def save_edited_receipt(receipt, vendor, transaction_date, amount, category, currency, confidence):
-    """Save edited receipt data."""
-    try:
-        # Update receipt object
-        receipt.vendor = vendor
-        receipt.transaction_date = datetime.combine(transaction_date, datetime.min.time())
-        receipt.amount = Decimal(str(amount))
-        receipt.category = CategoryEnum(category)
-        receipt.currency = CurrencyEnum(currency)
-        receipt.confidence_score = confidence
+            items_per_page = st.selectbox(
+                "Items per Page",
+                [10, 25, 50, 100],
+                index=1
+            )
         
-        # Save to database
-        db_manager = DatabaseManager()
-        success = db_manager.update_receipt(receipt)
+        # Sort receipts
+        if sort_by == "Date (Newest)":
+            filtered_receipts.sort(key=lambda x: x.receipt_date or datetime.min, reverse=True)
+        elif sort_by == "Date (Oldest)":
+            filtered_receipts.sort(key=lambda x: x.receipt_date or datetime.min)
+        elif sort_by == "Amount (High)":
+            filtered_receipts.sort(key=lambda x: x.total_amount or 0, reverse=True)
+        elif sort_by == "Amount (Low)":
+            filtered_receipts.sort(key=lambda x: x.total_amount or 0)
+        elif sort_by == "Merchant":
+            filtered_receipts.sort(key=lambda x: x.merchant_name or "")
         
-        if success:
-            st.success("Receipt updated successfully!")
-            st.session_state.edit_mode = False
-            st.session_state.editing_receipt = None
-            st.rerun()
+        # Pagination
+        total_pages = (len(filtered_receipts) - 1) // items_per_page + 1
+        
+        if total_pages > 1:
+            col1, col2, col3 = st.columns([1, 2, 1])
+            with col2:
+                page = st.selectbox(
+                    f"Page (1-{total_pages})",
+                    range(1, total_pages + 1),
+                    format_func=lambda x: f"Page {x} of {total_pages}"
+                )
         else:
-            st.error("Failed to update receipt")
-            
+            page = 1
+        
+        # Calculate pagination
+        start_idx = (page - 1) * items_per_page
+        end_idx = min(start_idx + items_per_page, len(filtered_receipts))
+        page_receipts = filtered_receipts[start_idx:end_idx]
+        
+        # Display receipts based on view mode
+        if view_mode == "Table":
+            display_table_view(page_receipts)
+        elif view_mode == "Cards":
+            display_card_view(page_receipts)
+        else:  # Detailed
+            display_detailed_view(page_receipts)
+        
+        # Bulk actions
+        st.subheader("🔧 Bulk Actions")
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            if st.button("📤 Export Filtered Data", type="secondary"):
+                export_receipts(filtered_receipts)
+        
+        with col2:
+            if st.button("🗑️ Delete Selected", type="secondary"):
+                st.info("🚧 Coming Soon: Bulk delete functionality!")
+        
+        with col3:
+            if st.button("🏷️ Bulk Categorize", type="secondary"):
+                st.info("🚧 Coming Soon: Bulk categorization!")
+    
     except Exception as e:
-        st.error(f"Error updating receipt: {e}")
+        logger.error(f"Error in data explorer: {e}")
+        st.error(f"❌ Error loading data: {str(e)}")
 
-def delete_selected_receipts():
-    """Delete selected receipts with confirmation."""
-    if not st.session_state.selected_receipts:
+def display_table_view(receipts):
+    """Display receipts in table format"""
+    if not receipts:
         return
     
-    receipt_count = len(st.session_state.selected_receipts)
+    # Create DataFrame
+    data = []
+    for receipt in receipts:
+        data.append({
+            'Date': receipt.receipt_date.strftime('%Y-%m-%d') if receipt.receipt_date else 'Unknown',
+            'Merchant': receipt.merchant_name or 'Unknown',
+            'Amount': f"${receipt.total_amount:.2f}" if receipt.total_amount else '$0.00',
+            'Items': len(receipt.items),
+            'Category': receipt.category or 'Uncategorized',
+            'Filename': receipt.filename
+        })
     
-    if st.button(f"⚠️ Confirm Delete {receipt_count} Receipt(s)", type="secondary"):
-        try:
-            db_manager = DatabaseManager()
-            receipt_ids = [r.id for r in st.session_state.selected_receipts]
-            deleted_count = db_manager.bulk_delete_receipts(receipt_ids)
-            
-            st.success(f"Deleted {deleted_count} receipts")
-            st.session_state.selected_receipts = []
-            st.rerun()
-            
-        except Exception as e:
-            st.error(f"Error deleting receipts: {e}")
-
-def delete_receipt(receipt_id):
-    """Delete a single receipt."""
-    try:
-        db_manager = DatabaseManager()
-        success = db_manager.delete_receipt(receipt_id)
+    df = pd.DataFrame(data)
+    
+    # Display with selection capability
+    event = st.dataframe(
+        df,
+        use_container_width=True,
+        hide_index=True,
+        on_select="rerun",
+        selection_mode="multi-row"
+    )
+    
+    # Handle selection
+    if event.selection.rows:
+        selected_receipts = [receipts[i] for i in event.selection.rows]
+        st.success(f"✅ Selected {len(selected_receipts)} receipts")
         
-        if success:
-            st.success("Receipt deleted successfully!")
-            st.session_state.edit_mode = False
-            st.session_state.editing_receipt = None
-            st.rerun()
-        else:
-            st.error("Failed to delete receipt")
-            
-    except Exception as e:
-        st.error(f"Error deleting receipt: {e}")
+        # Show quick actions for selected receipts
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            if st.button("📋 View Details"):
+                for receipt in selected_receipts[:3]:  # Limit to 3 for display
+                    with st.expander(f"{receipt.filename}"):
+                        display_receipt_details(receipt)
+        
+        with col2:
+            if st.button("📤 Export Selected"):
+                export_receipts(selected_receipts)
+        
+        with col3:
+            total_selected = sum(r.total_amount for r in selected_receipts if r.total_amount)
+            st.metric("Selected Total", f"${total_selected:.2f}")
 
-def analyze_selected_receipts():
-    """Analyze selected receipts."""
-    if not st.session_state.selected_receipts:
-        return
+def display_card_view(receipts):
+    """Display receipts in card format"""
+    cols = st.columns(2)
     
-    analyzer = ReceiptAnalyzer()
-    analytics = analyzer.generate_analytics(st.session_state.selected_receipts)
-    
-    st.subheader("📊 Analysis Results")
-    
-    col1, col2, col3, col4 = st.columns(4)
+    for i, receipt in enumerate(receipts):
+        with cols[i % 2]:
+            with st.container():
+                st.markdown(f"""
+                <div style="border: 1px solid #ddd; border-radius: 10px; padding: 15px; margin: 10px 0;">
+                    <h4>{receipt.merchant_name or 'Unknown Merchant'}</h4>
+                    <p><strong>Date:</strong> {receipt.receipt_date.strftime('%Y-%m-%d') if receipt.receipt_date else 'Unknown'}</p>
+                    <p><strong>Amount:</strong> ${receipt.total_amount:.2f if receipt.total_amount else 0:.2f}</p>
+                    <p><strong>Items:</strong> {len(receipt.items)}</p>
+                    <p><strong>Category:</strong> {receipt.category or 'Uncategorized'}</p>
+                </div>
+                """, unsafe_allow_html=True)
+                
+                if st.button(f"View Details", key=f"card_{receipt.id}"):
+                    with st.expander("Receipt Details", expanded=True):
+                        display_receipt_details(receipt)
+
+def display_detailed_view(receipts):
+    """Display receipts in detailed format"""
+    for receipt in receipts:
+        with st.expander(f"{receipt.merchant_name or 'Unknown'} - {receipt.receipt_date.strftime('%Y-%m-%d') if receipt.receipt_date else 'Unknown'} - ${receipt.total_amount:.2f if receipt.total_amount else 0:.2f}"):
+            display_receipt_details(receipt)
+
+def display_receipt_details(receipt):
+    """Display detailed information for a single receipt"""
+    col1, col2 = st.columns(2)
     
     with col1:
-        st.metric("Total Receipts", analytics.total_receipts)
+        st.subheader("📋 Receipt Information")
+        st.write(f"**Filename:** {receipt.filename}")
+        st.write(f"**Merchant:** {receipt.merchant_name or 'Unknown'}")
+        st.write(f"**Date:** {receipt.receipt_date.strftime('%Y-%m-%d') if receipt.receipt_date else 'Unknown'}")
+        st.write(f"**Amount:** ${receipt.total_amount:.2f if receipt.total_amount else 0:.2f}")
+        st.write(f"**Category:** {receipt.category or 'Uncategorized'}")
+        st.write(f"**Upload Date:** {receipt.upload_date.strftime('%Y-%m-%d %H:%M')}")
+        
+        if receipt.notes:
+            st.write(f"**Notes:** {receipt.notes}")
     
     with col2:
-        st.metric("Total Amount", f"${analytics.total_amount}")
+        st.subheader("🛍️ Items")
+        if receipt.items:
+            items_data = []
+            for item in receipt.items:
+                items_data.append({
+                    'Item': item.name,
+                    'Quantity': item.quantity,
+                    'Price': f"${item.price:.2f}",
+                    'Category': item.category or 'N/A'
+                })
+            
+            items_df = pd.DataFrame(items_data)
+            st.dataframe(items_df, use_container_width=True, hide_index=True)
+        else:
+            st.info("No items extracted from this receipt")
+    
+    # Raw text
+    st.subheader("📄 Raw Text")
+    st.text_area("", receipt.raw_text, height=150, disabled=True, key=f"raw_text_{receipt.id}")
+    
+    # Actions
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        if st.button("🗑️ Delete", key=f"delete_{receipt.id}", type="secondary"):
+            if st.session_state.db_manager.delete_receipt(receipt.id):
+                st.success("✅ Receipt deleted successfully!")
+                st.rerun()
+            else:
+                st.error("❌ Failed to delete receipt")
+    
+    with col2:
+        if st.button("✏️ Edit", key=f"edit_{receipt.id}", type="secondary"):
+            st.info("🚧 Edit functionality coming soon!")
     
     with col3:
-        st.metric("Average Amount", f"${analytics.average_amount}")
-    
-    with col4:
-        st.metric("Median Amount", f"${analytics.median_amount}")
-    
-    # Vendor breakdown
-    if analytics.vendor_stats:
-        st.subheader("🏪 Top Vendors")
-        vendor_data = []
-        for vendor, stats in analytics.vendor_stats.items():
-            vendor_data.append({
-                'Vendor': vendor,
-                'Count': stats['count'],
-                'Total': f"${stats['total_amount']}"
-            })
-        
-        st.dataframe(pd.DataFrame(vendor_data), use_container_width=True)
+        if st.button("📤 Export", key=f"export_{receipt.id}", type="secondary"):
+            export_receipts([receipt])
 
-def export_selected_receipts():
-    """Export selected receipts to CSV or JSON."""
-    if not st.session_state.selected_receipts:
+def export_receipts(receipts):
+    """Export receipts to CSV"""
+    if not receipts:
+        st.warning("No receipts to export")
         return
     
-    st.subheader("📤 Export Data")
+    # Prepare export data
+    export_data = []
+    for receipt in receipts:
+        export_data.append({
+            'filename': receipt.filename,
+            'merchant': receipt.merchant_name or '',
+            'date': receipt.receipt_date.strftime('%Y-%m-%d') if receipt.receipt_date else '',
+            'amount': receipt.total_amount or 0,
+            'category': receipt.category or '',
+            'items_count': len(receipt.items),
+            'notes': receipt.notes or '',
+            'raw_text': receipt.raw_text
+        })
     
-    export_format = st.selectbox("Export Format", ["CSV", "JSON"])
+    # Create CSV
+    df = pd.DataFrame(export_data)
+    csv = df.to_csv(index=False)
     
-    if st.button("Download Export"):
-        try:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            
-            if export_format == "CSV":
-                # Create CSV data
-                csv_data = []
-                for receipt in st.session_state.selected_receipts:
-                    csv_data.append({
-                        'ID': receipt.id,
-                        'Vendor': receipt.vendor,
-                        'Date': receipt.transaction_date.strftime('%Y-%m-%d'),
-                        'Amount': str(receipt.amount),
-                        'Category': receipt.category.value,
-                        'Currency': receipt.currency.value,
-                        'Source File': receipt.source_file,
-                        'Confidence Score': receipt.confidence_score
-                    })
-                
-                df = pd.DataFrame(csv_data)
-                csv_string = df.to_csv(index=False)
-                
-                st.download_button(
-                    label="📥 Download CSV",
-                    data=csv_string,
-                    file_name=f"receipts_export_{timestamp}.csv",
-                    mime="text/csv"
-                )
-            
-            else:  # JSON
-                json_data = []
-                for receipt in st.session_state.selected_receipts:
-                    json_data.append(receipt.to_dict())
-                
-                json_string = json.dumps(json_data, indent=2, default=str)
-                
-                st.download_button(
-                    label="📥 Download JSON",
-                    data=json_string,
-                    file_name=f"receipts_export_{timestamp}.json",
-                    mime="application/json"
-                )
-            
-        except Exception as e:
-            st.error(f"Export failed: {e}")
-
-def main():
-    """Main page function."""
-    # Apply styling
-    apply_custom_css()
+    # Download button
+    st.download_button(
+        label="📥 Download CSV",
+        data=csv,
+        file_name=f"receipts_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+        mime="text/csv"
+    )
     
-    # Initialize session state
-    initialize_session_state()
-    
-    # Create sidebar
-    create_sidebar()
-    
-    # Page header
-    st.title("🔍 Data Explorer")
-    st.markdown("Upload, search, edit, and manage your receipt data")
-    st.markdown("---")
-    
-    # Show edit interface if in edit mode
-    if st.session_state.edit_mode:
-        show_edit_interface()
-        st.markdown("---")
-    
-    # Main content tabs
-    tab1, tab2, tab3 = st.tabs(["📤 Upload", "🔍 Search", "📋 Data Table"])
-    
-    with tab1:
-        upload_and_process_files()
-    
-    with tab2:
-        show_search_interface()
-    
-    with tab3:
-        display_receipts_table()
+    st.success(f"✅ Prepared {len(receipts)} receipts for export!")
 
 if __name__ == "__main__":
     main()

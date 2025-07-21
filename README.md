@@ -1,272 +1,151 @@
 # Receipt Processing Application
 
-A professional full-stack receipt processing application built with Python and Streamlit that extracts structured data from various file formats and provides comprehensive analytical insights.
+A comprehensive receipt processing application built with Streamlit that allows users to upload, process, analyze, and manage receipt data with advanced OCR capabilities.
 
-## 🚀 Features
+## Features
 
-### Core Functionality
-- **Multi-format Support**: Process PDFs, images (JPG, PNG, TIFF, BMP)
-- **Advanced OCR**: Hybrid text extraction using PyMuPDF and Tesseract
-- **Intelligent Data Extraction**: Automatic vendor, date, amount, and category detection
-- **Data Validation**: Comprehensive validation using Pydantic models
-- **Database Management**: SQLite with proper indexing and ACID compliance
+### 📄 Receipt Processing
+- **Multi-format Support**: Process PDF files and images (PNG, JPG, JPEG)
+- **Advanced OCR**: Powered by Tesseract with image preprocessing
+- **Smart Data Extraction**: Automatically extracts vendor, date, amount, and items
+- **Batch Processing**: Handle multiple receipts simultaneously
 
-### User Interface
-- **Multi-page Architecture**: Streamlit-based responsive web interface
-- **Interactive Analytics**: Comprehensive dashboards with Plotly visualizations
-- **Manual Correction**: Inline editing for extracted data
-- **Search & Filter**: Advanced search with fuzzy matching
-- **Data Export**: CSV and JSON export capabilities
+### 📊 Data Management
+- **Interactive Data Explorer**: Search, filter, and edit receipt data
+- **Advanced Search**: Fuzzy search across all receipt fields
+- **Data Export**: Export filtered data to CSV format
+- **Bulk Operations**: Edit multiple receipts at once
 
-### Advanced Features
-- **Image Preprocessing**: Perspective correction, noise removal, binarization
-- **Pattern Detection**: Spending anomalies and duplicate receipt detection
-- **Trend Analysis**: Time-based spending patterns and seasonal insights
-- **Vendor Loyalty**: Analysis of vendor relationships and spending habits
-- **Currency Support**: Multi-currency detection and handling
+### 📈 Analytics Dashboard
+- **Spending Insights**: Visualize spending patterns over time
+- **Vendor Analysis**: Track spending by vendor with interactive charts
+- **Category Breakdown**: Analyze expenses by category
+- **Trend Analysis**: Identify spending trends and patterns
 
-## 🏗️ Architecture
+### 🔍 Smart Features
+- **Duplicate Detection**: Automatically identify potential duplicate receipts
+- **Pattern Recognition**: Detect unusual spending patterns
+- **Data Validation**: Ensure data quality with built-in validation
+- **Error Handling**: Robust error handling for file processing
 
-### Project Structure
+## Installation
+
+### Local Development
+
+1. **Clone the repository**
+   \`\`\`bash
+   git clone <repository-url>
+   cd receipt-processor
+   \`\`\`
+
+2. **Install dependencies**
+   \`\`\`bash
+   pip install -r requirements.txt
+   \`\`\`
+
+3. **Install Tesseract OCR**
+   
+   **Ubuntu/Debian:**
+   \`\`\`bash
+   sudo apt-get update
+   sudo apt-get install tesseract-ocr
+   \`\`\`
+   
+   **macOS:**
+   \`\`\`bash
+   brew install tesseract
+   \`\`\`
+   
+   **Windows:**
+   Download and install from: https://github.com/UB-Mannheim/tesseract/wiki
+
+4. **Run the application**
+   \`\`\`bash
+   streamlit run src/app.py
+   \`\`\`
+
+### Railway Deployment
+
+This application is configured for easy deployment on Railway:
+
+1. **Connect Repository**: Link your GitHub repository to Railway
+2. **Automatic Build**: Railway will automatically detect the configuration
+3. **Environment Setup**: Tesseract OCR is automatically installed via nixpacks.toml
+4. **Deploy**: The application will be available at your Railway URL
+
+## Project Structure
+
 \`\`\`
 receipt-processor/
 ├── src/
 │   ├── app.py                 # Main Streamlit application
-│   ├── core/                  # Backend logic modules
-│   │   ├── models.py          # Pydantic data models
-│   │   ├── parsing.py         # File processing & OCR
-│   │   ├── database.py        # Database layer (SQLite)
-│   │   └── algorithms.py      # Search & analytics algorithms
-│   ├── pages/                 # Streamlit pages
+│   ├── core/
+│   │   ├── models.py          # Data models and validation
+│   │   ├── database.py        # Database operations
+│   │   ├── parsing.py         # OCR and text extraction
+│   │   └── algorithms.py      # Analysis algorithms
+│   ├── pages/
 │   │   ├── 1_Data_Explorer.py # Data management interface
-│   │   └── 2_Analytics_Dashboard.py # Analytics & visualizations
-│   └── ui/                    # UI components
+│   │   └── 2_Analytics_Dashboard.py # Analytics and insights
+│   └── ui/
 │       └── components.py      # Reusable UI components
-├── tests/                     # Test files
+├── tests/
+│   ├── test_database.py       # Database tests
+│   └── test_models.py         # Model validation tests
 ├── requirements.txt           # Python dependencies
-├── .gitignore                # Git ignore rules
+├── nixpacks.toml             # Railway deployment config
+├── Procfile                  # Process configuration
 └── README.md                 # This file
 \`\`\`
 
-### Technology Stack
-- **Frontend**: Streamlit with multi-page architecture
-- **Backend**: Python with modular design
-- **Database**: SQLite with proper indexing
-- **OCR**: PyMuPDF (text-based PDFs) + Tesseract (images)
-- **Image Processing**: OpenCV for preprocessing
-- **Data Validation**: Pydantic models
-- **Visualizations**: Plotly for interactive charts
-- **Data Processing**: Pandas for analytics
-
-## 🛠️ Installation & Setup
-
-### Prerequisites
-- Python 3.8 or higher
-- Tesseract OCR engine
-
-### Install Tesseract OCR
-
-**Windows:**
-1. Download from: https://github.com/UB-Mannheim/tesseract/wiki
-2. Install and add to PATH
-
-**macOS:**
-\`\`\`bash
-brew install tesseract
-\`\`\`
-
-**Ubuntu/Debian:**
-\`\`\`bash
-sudo apt-get update
-sudo apt-get install tesseract-ocr
-\`\`\`
-
-### Application Setup
-
-1. **Clone the repository:**
-\`\`\`bash
-git clone <repository-url>
-cd receipt-processor
-\`\`\`
-
-2. **Create virtual environment:**
-\`\`\`bash
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-\`\`\`
-
-3. **Install dependencies:**
-\`\`\`bash
-pip install -r requirements.txt
-\`\`\`
-
-4. **Run the application:**
-\`\`\`bash
-streamlit run src/app.py
-\`\`\`
-
-5. **Access the application:**
-Open your browser and navigate to `http://localhost:8501`
-
-## 📖 Usage Guide
+## Usage
 
 ### 1. Upload Receipts
-- Navigate to the **Data Explorer** page
-- Use the file uploader to select receipt files
-- Supported formats: PDF, JPG, PNG, TIFF, BMP (max 10MB)
-- Review and correct extracted data before saving
+- Navigate to the main page
+- Upload PDF files or images using the file uploader
+- The system will automatically process and extract data
 
-### 2. Search & Filter
-- Use the search interface to find specific receipts
-- Filter by vendor, date range, amount, category, or currency
-- Enable fuzzy search for similar vendor names
-- Sort results by various criteria
+### 2. Explore Data
+- Use the **Data Explorer** page to view all processed receipts
+- Search and filter receipts using various criteria
+- Edit receipt data directly in the interface
+- Export filtered data to CSV
 
-### 3. Edit Receipts
-- Select receipts for manual correction
-- Update vendor names, amounts, dates, and categories
-- View original extracted text for reference
-- Save changes to update the database
+### 3. Analyze Spending
+- Visit the **Analytics Dashboard** for insights
+- View spending trends over time
+- Analyze vendor and category breakdowns
+- Identify spending patterns and anomalies
 
-### 4. Analytics Dashboard
-- **Overview**: Key metrics and quick insights
-- **Spending Analysis**: Detailed breakdowns by vendor and category
-- **Time Trends**: Seasonal patterns and spending trends
-- **Advanced Insights**: Anomaly detection and duplicate identification
+## Technical Details
 
-### 5. Export Data
-- Export filtered results as CSV or JSON
-- Download files with timestamp-based naming
-- Preserve all receipt metadata in exports
+### OCR Processing
+- **Image Preprocessing**: Automatic image enhancement for better OCR results
+- **Multi-engine Support**: Uses both PyMuPDF and Tesseract for optimal results
+- **Error Recovery**: Fallback mechanisms for challenging documents
 
-## 🚀 Deployment
+### Database
+- **SQLite Backend**: Lightweight, serverless database
+- **Data Validation**: Pydantic models ensure data integrity
+- **Performance**: Optimized queries for fast data retrieval
 
-### Railway Deployment
-This application is configured for Railway deployment with:
-- `nixpacks.toml` for build configuration
-- `Procfile` for start command
-- Automatic Tesseract OCR installation
+### Analytics
+- **Real-time Processing**: Analytics update automatically as data changes
+- **Interactive Visualizations**: Plotly-powered charts and graphs
+- **Statistical Analysis**: Advanced algorithms for pattern detection
 
-### Other Platforms
-- **Streamlit Cloud**: Direct GitHub integration
-- **Heroku**: Python buildpack support
-- **Docker**: Containerized deployment ready
+## API Reference
 
-## 🔧 Configuration
+### Core Classes
 
-### Environment Variables
-Create a `.env` file in the root directory:
-\`\`\`env
-# Database configuration
-DATABASE_PATH=receipts.db
-
-# OCR configuration
-TESSERACT_CMD=/usr/bin/tesseract  # Path to tesseract executable
-
-# Logging level
-LOG_LEVEL=INFO
-\`\`\`
-
-### Customization Options
-- **Categories**: Modify `CategoryEnum` in `models.py`
-- **Currencies**: Update `CurrencyEnum` for additional currencies
-- **OCR Settings**: Adjust Tesseract configuration in `parsing.py`
-- **UI Styling**: Customize CSS in Streamlit components
-
-## 🧪 Testing
-
-Run the test suite:
-\`\`\`bash
-python -m pytest tests/ -v
-\`\`\`
-
-Test coverage:
-\`\`\`bash
-python -m pytest tests/ --cov=src --cov-report=html
-\`\`\`
-
-## 📊 Performance Considerations
-
-### Database Optimization
-- Indexed columns for fast queries
-- Parameterized queries to prevent SQL injection
-- Connection pooling for concurrent access
-
-### Image Processing
-- Optimized preprocessing pipeline
-- Memory-efficient operations
-- Batch processing capabilities
-
-### OCR Accuracy
-- Image enhancement techniques
-- Multiple extraction patterns
-- Confidence scoring and validation
-
-## 🚧 Limitations & Assumptions
-
-### Current Limitations
-- Single-page receipt processing only
-- English language OCR primarily
-- Limited to common receipt formats
-- No real-time processing
-
-### Assumptions
-- Receipts contain standard information (vendor, date, amount)
-- Images are reasonably clear and well-lit
-- PDF files are not password-protected
-- Amounts are in decimal format
-
-## 🛣️ Future Enhancements
-
-### Planned Features
-- **Batch Processing**: Multiple file upload and processing
-- **Multi-language Support**: Additional OCR language packs
-- **Cloud Storage**: Integration with cloud storage services
-- **Mobile App**: React Native mobile application
-- **API Endpoints**: RESTful API for external integrations
-- **Machine Learning**: Improved categorization with ML models
-
-### Technical Improvements
-- **Caching**: Redis for improved performance
-- **Async Processing**: Background task processing
-- **Microservices**: Service-oriented architecture
-- **Docker**: Containerized deployment
-- **CI/CD**: Automated testing and deployment
-
-## 🤝 Contributing
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
-### Development Guidelines
-- Follow PEP 8 style guidelines
-- Add comprehensive docstrings
-- Include unit tests for new features
-- Update documentation as needed
-
-## 📄 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## 🙏 Acknowledgments
-
-- **Streamlit** for the excellent web framework
-- **Tesseract OCR** for optical character recognition
-- **PyMuPDF** for PDF text extraction
-- **OpenCV** for image processing capabilities
-- **Plotly** for interactive visualizations
-
-## 📞 Support
-
-For support and questions:
-- Create an issue in the repository
-- Check the documentation
-- Review existing issues for solutions
-
----
-
-**Built with ❤️ using Python, Streamlit, and modern web technologies**
-\`\`\`
+#### `Receipt`
+```python
+class Receipt(BaseModel):
+    id: Optional[int] = None
+    vendor: str
+    transaction_date: date
+    amount: float
+    items: List[str] = []
+    category: str = "Other"
+    payment_method: str = "Unknown"
+    created_at: Optional[datetime] = None

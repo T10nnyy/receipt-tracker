@@ -1,496 +1,366 @@
-"""
-Algorithms Module - Search, Sort, and Analytics Implementation
-
-This module implements core algorithms for searching, sorting, and analyzing receipt data.
-Includes optimized search mechanisms, efficient sorting algorithms, and comprehensive
-statistical analysis functions.
-
-Time Complexity Analysis:
-- Search: O(n) for linear search, O(log n) for indexed search
-- Sort: O(n log n) using Python's Timsort algorithm
-- Aggregation: O(n) for most statistical computations
-
-Author: Receipt Processing Team
-Version: 1.0.0
-"""
-
 import re
-import statistics
-from collections import defaultdict, Counter
+import logging
+from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
-from decimal import Decimal
-from typing import List, Dict, Any, Optional, Tuple
-from dataclasses import dataclass
+from collections import defaultdict, Counter
+import numpy as np
+from difflib import SequenceMatcher
 import Levenshtein
 
-from .models import Receipt, CategoryEnum, CurrencyEnum
+from .models import Receipt, ReceiptItem
 
-@dataclass
-class SearchFilters:
-    """Data class for search filter parameters."""
-    vendor_query: Optional[str] = None
-    date_from: Optional[datetime] = None
-    date_to: Optional[datetime] = None
-    amount_min: Optional[Decimal] = None
-    amount_max: Optional[Decimal] = None
-    category: Optional[CategoryEnum] = None
-    currency: Optional[CurrencyEnum] = None
-    fuzzy_search: bool = False
-    confidence_threshold: float = 0.0
-
-@dataclass
-class AnalyticsData:
-    """Data class for analytics results."""
-    total_receipts: int
-    total_amount: Decimal
-    average_amount: Decimal
-    median_amount: Decimal
-    vendor_stats: Dict[str, Dict[str, Any]]
-    category_stats: Dict[str, Dict[str, Any]]
-    monthly_stats: Dict[str, Dict[str, Any]]
-    currency_stats: Dict[str, Dict[str, Any]]
-    spending_patterns: Dict[str, Any]
-    anomalies: List[Dict[str, Any]]
+logger = logging.getLogger(__name__)
 
 class ReceiptAnalyzer:
-    """
-    Advanced analytics engine for receipt data analysis.
-    
-    Implements efficient algorithms for searching, sorting, and statistical analysis
-    of receipt data with optimized time complexity and comprehensive insights.
-    """
+    """Analyzes receipts for patterns, insights, and search functionality"""
     
     def __init__(self):
-        """Initialize the analyzer with default parameters."""
-        self.fuzzy_threshold = 0.8  # Similarity threshold for fuzzy matching
-        self.anomaly_threshold = 2.0  # Standard deviations for anomaly detection
+        self.stop_words = {
+            'the', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by',
+            'store', 'shop', 'market', 'receipt', 'total', 'subtotal', 'tax', 'amount'
+        }
     
-    def search_receipts(self, receipts: List[Receipt], filters: SearchFilters) -> List[Receipt]:
-        """
-        Search receipts using multiple criteria with optimized algorithms.
+    def search_receipts(self, query: str, receipts: List[Receipt]) -> List[Receipt]:
+        """Search receipts using fuzzy matching and relevance scoring"""
+        if not query.strip():
+            return receipts
         
-        Time Complexity: O(n) where n is the number of receipts
-        Space Complexity: O(k) where k is the number of matching receipts
-        
-        Args:
-            receipts: List of receipt objects to search
-            filters: Search criteria and parameters
-            
-        Returns:
-            List of receipts matching the search criteria
-        """
-        filtered_receipts = receipts.copy()
-        
-        # Vendor search with fuzzy matching support
-        if filters.vendor_query:
-            if filters.fuzzy_search:
-                filtered_receipts = self._fuzzy_vendor_search(
-                    filtered_receipts, filters.vendor_query
-                )
-            else:
-                query_lower = filters.vendor_query.lower()
-                filtered_receipts = [
-                    r for r in filtered_receipts 
-                    if query_lower in r.vendor.lower()
-                ]
-        
-        # Date range filtering
-        if filters.date_from:
-            filtered_receipts = [
-                r for r in filtered_receipts 
-                if r.transaction_date >= filters.date_from
-            ]
-        
-        if filters.date_to:
-            filtered_receipts = [
-                r for r in filtered_receipts 
-                if r.transaction_date <= filters.date_to
-            ]
-        
-        # Amount range filtering
-        if filters.amount_min is not None:
-            filtered_receipts = [
-                r for r in filtered_receipts 
-                if r.amount >= filters.amount_min
-            ]
-        
-        if filters.amount_max is not None:
-            filtered_receipts = [
-                r for r in filtered_receipts 
-                if r.amount <= filters.amount_max
-            ]
-        
-        # Category filtering
-        if filters.category:
-            filtered_receipts = [
-                r for r in filtered_receipts 
-                if r.category == filters.category
-            ]
-        
-        # Currency filtering
-        if filters.currency:
-            filtered_receipts = [
-                r for r in filtered_receipts 
-                if r.currency == filters.currency
-            ]
-        
-        # Confidence threshold filtering
-        if filters.confidence_threshold > 0:
-            filtered_receipts = [
-                r for r in filtered_receipts 
-                if r.confidence_score >= filters.confidence_threshold
-            ]
-        
-        return filtered_receipts
-    
-    def _fuzzy_vendor_search(self, receipts: List[Receipt], query: str) -> List[Receipt]:
-        """
-        Perform fuzzy string matching for vendor names using Levenshtein distance.
-        
-        Time Complexity: O(n * m) where n is receipts count, m is average vendor name length
-        
-        Args:
-            receipts: List of receipts to search
-            query: Search query string
-            
-        Returns:
-            List of receipts with similar vendor names
-        """
-        matching_receipts = []
-        query_lower = query.lower()
+        query_lower = query.lower().strip()
+        scored_receipts = []
         
         for receipt in receipts:
-            vendor_lower = receipt.vendor.lower()
-            
-            # Calculate similarity ratio
-            similarity = Levenshtein.ratio(query_lower, vendor_lower)
-            
-            if similarity >= self.fuzzy_threshold:
-                matching_receipts.append(receipt)
+            score = self._calculate_relevance_score(query_lower, receipt)
+            if score > 0:
+                scored_receipts.append((receipt, score))
         
-        return matching_receipts
+        # Sort by relevance score (descending)
+        scored_receipts.sort(key=lambda x: x[1], reverse=True)
+        
+        return [receipt for receipt, score in scored_receipts]
     
-    def sort_receipts(self, receipts: List[Receipt], sort_by: str, ascending: bool = True) -> List[Receipt]:
-        """
-        Sort receipts using optimized algorithms with comprehensive field support.
+    def _calculate_relevance_score(self, query: str, receipt: Receipt) -> float:
+        """Calculate relevance score for a receipt based on query"""
+        score = 0.0
         
-        Time Complexity: O(n log n) using Python's Timsort algorithm
-        Space Complexity: O(n) for the sorted list
+        # Search in merchant name (high weight)
+        if receipt.merchant_name:
+            merchant_similarity = self._fuzzy_match(query, receipt.merchant_name.lower())
+            score += merchant_similarity * 3.0
         
-        Args:
-            receipts: List of receipts to sort
-            sort_by: Field to sort by ('date', 'amount', 'vendor', 'category', 'confidence')
-            ascending: Sort direction (True for ascending, False for descending)
-            
-        Returns:
-            Sorted list of receipts
-        """
-        sort_keys = {
-            'date': lambda r: r.transaction_date,
-            'amount': lambda r: r.amount,
-            'vendor': lambda r: r.vendor.lower(),
-            'category': lambda r: r.category.value,
-            'confidence': lambda r: r.confidence_score,
-            'currency': lambda r: r.currency.value
-        }
+        # Search in raw text (medium weight)
+        if receipt.raw_text:
+            text_similarity = self._text_contains_query(query, receipt.raw_text.lower())
+            score += text_similarity * 1.5
         
-        if sort_by not in sort_keys:
-            raise ValueError(f"Invalid sort field: {sort_by}")
+        # Search in items (high weight)
+        for item in receipt.items:
+            item_similarity = self._fuzzy_match(query, item.name.lower())
+            score += item_similarity * 2.0
         
-        return sorted(receipts, key=sort_keys[sort_by], reverse=not ascending)
+        # Search in notes (medium weight)
+        if receipt.notes:
+            notes_similarity = self._fuzzy_match(query, receipt.notes.lower())
+            score += notes_similarity * 1.0
+        
+        # Exact matches get bonus points
+        if query in receipt.raw_text.lower():
+            score += 2.0
+        
+        return score
     
-    def generate_analytics(self, receipts: List[Receipt]) -> AnalyticsData:
-        """
-        Generate comprehensive analytics from receipt data.
+    def _fuzzy_match(self, query: str, text: str) -> float:
+        """Calculate fuzzy match score between query and text"""
+        if not query or not text:
+            return 0.0
         
-        Time Complexity: O(n) for most computations
-        Space Complexity: O(n) for storing aggregated data
+        # Direct substring match
+        if query in text:
+            return 1.0
         
-        Args:
-            receipts: List of receipts to analyze
+        # Levenshtein distance based similarity
+        max_len = max(len(query), len(text))
+        if max_len == 0:
+            return 0.0
+        
+        distance = Levenshtein.distance(query, text)
+        similarity = 1.0 - (distance / max_len)
+        
+        # Only return meaningful similarities
+        return similarity if similarity > 0.6 else 0.0
+    
+    def _text_contains_query(self, query: str, text: str) -> float:
+        """Check if text contains query words with partial matching"""
+        query_words = set(query.split()) - self.stop_words
+        text_words = set(text.split())
+        
+        if not query_words:
+            return 0.0
+        
+        matches = 0
+        for query_word in query_words:
+            # Exact word match
+            if query_word in text_words:
+                matches += 1
+                continue
             
-        Returns:
-            AnalyticsData object with comprehensive insights
-        """
+            # Partial word match
+            for text_word in text_words:
+                if len(query_word) > 3 and query_word in text_word:
+                    matches += 0.5
+                    break
+        
+        return matches / len(query_words)
+    
+    def generate_analytics(self, receipts: List[Receipt]) -> Dict[str, Any]:
+        """Generate comprehensive analytics from receipts"""
         if not receipts:
             return self._empty_analytics()
         
-        # Basic statistics
-        amounts = [float(r.amount) for r in receipts]
-        total_amount = Decimal(str(sum(amounts)))
-        average_amount = Decimal(str(statistics.mean(amounts)))
-        median_amount = Decimal(str(statistics.median(amounts)))
+        analytics = {
+            'total_receipts': len(receipts),
+            'total_amount': 0.0,
+            'average_amount': 0.0,
+            'unique_merchants': 0,
+            'date_range': {},
+            'top_merchants': {},
+            'spending_by_date': {},
+            'monthly_breakdown': [],
+            'category_breakdown': {},
+            'receipts_this_month': 0,
+            'amount_this_month': 0.0
+        }
         
-        # Vendor analysis
-        vendor_stats = self._analyze_vendors(receipts)
-        
-        # Category analysis
-        category_stats = self._analyze_categories(receipts)
-        
-        # Monthly trends
-        monthly_stats = self._analyze_monthly_trends(receipts)
-        
-        # Currency analysis
-        currency_stats = self._analyze_currencies(receipts)
-        
-        # Spending patterns
-        spending_patterns = self._analyze_spending_patterns(receipts)
-        
-        # Anomaly detection
-        anomalies = self._detect_anomalies(receipts, amounts)
-        
-        return AnalyticsData(
-            total_receipts=len(receipts),
-            total_amount=total_amount,
-            average_amount=average_amount,
-            median_amount=median_amount,
-            vendor_stats=vendor_stats,
-            category_stats=category_stats,
-            monthly_stats=monthly_stats,
-            currency_stats=currency_stats,
-            spending_patterns=spending_patterns,
-            anomalies=anomalies
-        )
-    
-    def _analyze_vendors(self, receipts: List[Receipt]) -> Dict[str, Dict[str, Any]]:
-        """Analyze vendor-specific statistics and patterns."""
-        vendor_stats = defaultdict(lambda: {
-            'count': 0,
-            'total_amount': Decimal('0.00'),
-            'average_amount': Decimal('0.00'),
-            'last_visit': None,
-            'frequency_score': 0.0
-        })
-        
-        for receipt in receipts:
-            stats = vendor_stats[receipt.vendor]
-            stats['count'] += 1
-            stats['total_amount'] += receipt.amount
+        try:
+            # Basic calculations
+            valid_amounts = [r.total_amount for r in receipts if r.total_amount and r.total_amount > 0]
+            analytics['total_amount'] = sum(valid_amounts)
+            analytics['average_amount'] = np.mean(valid_amounts) if valid_amounts else 0.0
             
-            if stats['last_visit'] is None or receipt.transaction_date > stats['last_visit']:
-                stats['last_visit'] = receipt.transaction_date
-        
-        # Calculate derived metrics
-        total_receipts = len(receipts)
-        for vendor, stats in vendor_stats.items():
-            if stats['count'] > 0:
-                stats['average_amount'] = stats['total_amount'] / stats['count']
-                stats['frequency_score'] = stats['count'] / total_receipts
-        
-        return dict(vendor_stats)
+            # Merchant analysis
+            merchant_spending = defaultdict(float)
+            merchants = set()
+            
+            for receipt in receipts:
+                if receipt.merchant_name:
+                    merchants.add(receipt.merchant_name)
+                    if receipt.total_amount:
+                        merchant_spending[receipt.merchant_name] += receipt.total_amount
+            
+            analytics['unique_merchants'] = len(merchants)
+            analytics['top_merchants'] = dict(
+                sorted(merchant_spending.items(), key=lambda x: x[1], reverse=True)[:10]
+            )
+            
+            # Date analysis
+            dates_with_amounts = [
+                (r.receipt_date, r.total_amount) 
+                for r in receipts 
+                if r.receipt_date and r.total_amount
+            ]
+            
+            if dates_with_amounts:
+                dates, amounts = zip(*dates_with_amounts)
+                analytics['date_range'] = {
+                    'start': min(dates).isoformat(),
+                    'end': max(dates).isoformat()
+                }
+                
+                # Spending by date
+                daily_spending = defaultdict(float)
+                for date, amount in dates_with_amounts:
+                    date_str = date.strftime('%Y-%m-%d')
+                    daily_spending[date_str] += amount
+                
+                analytics['spending_by_date'] = dict(daily_spending)
+                
+                # Monthly breakdown
+                monthly_data = defaultdict(lambda: {'count': 0, 'total': 0.0})
+                current_month = datetime.now().replace(day=1)
+                
+                for date, amount in dates_with_amounts:
+                    month_key = date.strftime('%Y-%m')
+                    monthly_data[month_key]['count'] += 1
+                    monthly_data[month_key]['total'] += amount
+                    
+                    # This month's data
+                    if date >= current_month:
+                        analytics['receipts_this_month'] += 1
+                        analytics['amount_this_month'] += amount
+                
+                analytics['monthly_breakdown'] = [
+                    {
+                        'month': month,
+                        'count': data['count'],
+                        'total': data['total'],
+                        'average': data['total'] / data['count']
+                    }
+                    for month, data in sorted(monthly_data.items(), reverse=True)
+                ]
+            
+            # Category analysis
+            category_spending = defaultdict(float)
+            for receipt in receipts:
+                if receipt.category and receipt.total_amount:
+                    category_spending[receipt.category] += receipt.total_amount
+            
+             
+                    category_spending[receipt.category] += receipt.total_amount
+            
+            analytics['category_breakdown'] = dict(category_spending)
+            
+            return analytics
+            
+        except Exception as e:
+            logger.error(f"Error generating analytics: {e}")
+            return self._empty_analytics()
     
-    def _analyze_categories(self, receipts: List[Receipt]) -> Dict[str, Dict[str, Any]]:
-        """Analyze category-specific spending patterns."""
-        category_stats = defaultdict(lambda: {
-            'count': 0,
-            'total_amount': Decimal('0.00'),
-            'average_amount': Decimal('0.00'),
-            'percentage': 0.0
-        })
-        
-        total_amount = sum(r.amount for r in receipts)
-        
-        for receipt in receipts:
-            category = receipt.category.value
-            stats = category_stats[category]
-            stats['count'] += 1
-            stats['total_amount'] += receipt.amount
-        
-        # Calculate derived metrics
-        for category, stats in category_stats.items():
-            if stats['count'] > 0:
-                stats['average_amount'] = stats['total_amount'] / stats['count']
-                stats['percentage'] = float(stats['total_amount'] / total_amount * 100)
-        
-        return dict(category_stats)
-    
-    def _analyze_monthly_trends(self, receipts: List[Receipt]) -> Dict[str, Dict[str, Any]]:
-        """Analyze monthly spending trends and patterns."""
-        monthly_stats = defaultdict(lambda: {
-            'count': 0,
-            'total_amount': Decimal('0.00'),
-            'average_amount': Decimal('0.00')
-        })
-        
-        for receipt in receipts:
-            month_key = receipt.transaction_date.strftime('%Y-%m')
-            stats = monthly_stats[month_key]
-            stats['count'] += 1
-            stats['total_amount'] += receipt.amount
-        
-        # Calculate derived metrics
-        for month, stats in monthly_stats.items():
-            if stats['count'] > 0:
-                stats['average_amount'] = stats['total_amount'] / stats['count']
-        
-        return dict(monthly_stats)
-    
-    def _analyze_currencies(self, receipts: List[Receipt]) -> Dict[str, Dict[str, Any]]:
-        """Analyze currency distribution and conversion patterns."""
-        currency_stats = defaultdict(lambda: {
-            'count': 0,
-            'total_amount': Decimal('0.00'),
-            'percentage': 0.0
-        })
-        
-        total_receipts = len(receipts)
-        
-        for receipt in receipts:
-            currency = receipt.currency.value
-            stats = currency_stats[currency]
-            stats['count'] += 1
-            stats['total_amount'] += receipt.amount
-        
-        # Calculate percentages
-        for currency, stats in currency_stats.items():
-            stats['percentage'] = (stats['count'] / total_receipts) * 100
-        
-        return dict(currency_stats)
-    
-    def _analyze_spending_patterns(self, receipts: List[Receipt]) -> Dict[str, Any]:
-        """Analyze advanced spending patterns and behaviors."""
-        if not receipts:
-            return {}
-        
-        # Day of week analysis
-        day_patterns = defaultdict(lambda: {'count': 0, 'total_amount': Decimal('0.00')})
-        for receipt in receipts:
-            day_name = receipt.transaction_date.strftime('%A')
-            day_patterns[day_name]['count'] += 1
-            day_patterns[day_name]['total_amount'] += receipt.amount
-        
-        # Time-based patterns
-        amounts = [float(r.amount) for r in receipts]
-        std_dev = statistics.stdev(amounts) if len(amounts) > 1 else 0
-        
-        # Vendor loyalty analysis
-        vendor_counts = Counter(r.vendor for r in receipts)
-        loyalty_score = len([v for v, c in vendor_counts.items() if c > 1]) / len(vendor_counts)
-        
+    def _empty_analytics(self) -> Dict[str, Any]:
+        """Return empty analytics structure"""
         return {
-            'day_patterns': dict(day_patterns),
-            'amount_std_dev': std_dev,
-            'vendor_loyalty_score': loyalty_score,
-            'unique_vendors': len(vendor_counts),
-            'repeat_vendors': len([v for v, c in vendor_counts.items() if c > 1])
+            'total_receipts': 0,
+            'total_amount': 0.0,
+            'average_amount': 0.0,
+            'unique_merchants': 0,
+            'date_range': {},
+            'top_merchants': {},
+            'spending_by_date': {},
+            'monthly_breakdown': [],
+            'category_breakdown': {},
+            'receipts_this_month': 0,
+            'amount_this_month': 0.0
         }
     
-    def _detect_anomalies(self, receipts: List[Receipt], amounts: List[float]) -> List[Dict[str, Any]]:
-        """Detect spending anomalies using statistical analysis."""
-        if len(amounts) < 3:
+    def detect_patterns(self, receipts: List[Receipt]) -> List[Dict[str, Any]]:
+        """Detect spending patterns and generate insights"""
+        patterns = []
+        
+        if len(receipts) < 2:
+            return patterns
+        
+        try:
+            # Frequent merchants pattern
+            merchant_counts = Counter(
+                r.merchant_name for r in receipts 
+                if r.merchant_name
+            )
+            
+            if merchant_counts:
+                most_frequent = merchant_counts.most_common(1)[0]
+                if most_frequent[1] >= 3:
+                    patterns.append({
+                        'type': 'frequent_merchant',
+                        'description': f"You frequently shop at {most_frequent[0]} ({most_frequent[1]} times)",
+                        'confidence': min(most_frequent[1] / len(receipts), 1.0)
+                    })
+            
+            # High spending pattern
+            amounts = [r.total_amount for r in receipts if r.total_amount]
+            if amounts:
+                avg_amount = np.mean(amounts)
+                high_spending = [a for a in amounts if a > avg_amount * 2]
+                
+                if len(high_spending) > len(amounts) * 0.1:  # More than 10% are high spending
+                    patterns.append({
+                        'type': 'high_spending',
+                        'description': f"You have {len(high_spending)} receipts with unusually high amounts (>${avg_amount * 2:.2f}+)",
+                        'confidence': len(high_spending) / len(amounts)
+                    })
+            
+            # Weekend vs weekday spending
+            weekend_amounts = []
+            weekday_amounts = []
+            
+            for receipt in receipts:
+                if receipt.receipt_date and receipt.total_amount:
+                    if receipt.receipt_date.weekday() >= 5:  # Saturday = 5, Sunday = 6
+                        weekend_amounts.append(receipt.total_amount)
+                    else:
+                        weekday_amounts.append(receipt.total_amount)
+            
+            if weekend_amounts and weekday_amounts:
+                weekend_avg = np.mean(weekend_amounts)
+                weekday_avg = np.mean(weekday_amounts)
+                
+                if weekend_avg > weekday_avg * 1.5:
+                    patterns.append({
+                        'type': 'weekend_spending',
+                        'description': f"You spend significantly more on weekends (${weekend_avg:.2f} vs ${weekday_avg:.2f})",
+                        'confidence': min((weekend_avg - weekday_avg) / weekday_avg, 1.0)
+                    })
+            
+            # Monthly spending trend
+            monthly_totals = defaultdict(float)
+            for receipt in receipts:
+                if receipt.receipt_date and receipt.total_amount:
+                    month_key = receipt.receipt_date.strftime('%Y-%m')
+                    monthly_totals[month_key] += receipt.total_amount
+            
+            if len(monthly_totals) >= 3:
+                sorted_months = sorted(monthly_totals.items())
+                recent_months = sorted_months[-3:]
+                
+                if len(recent_months) == 3:
+                    trend = []
+                    for i in range(1, len(recent_months)):
+                        current = recent_months[i][1]
+                        previous = recent_months[i-1][1]
+                        change = (current - previous) / previous if previous > 0 else 0
+                        trend.append(change)
+                    
+                    avg_trend = np.mean(trend)
+                    if avg_trend > 0.2:  # 20% increase trend
+                        patterns.append({
+                            'type': 'increasing_spending',
+                            'description': f"Your spending has been increasing over the last 3 months (average {avg_trend*100:.1f}% per month)",
+                            'confidence': min(abs(avg_trend), 1.0)
+                        })
+                    elif avg_trend < -0.2:  # 20% decrease trend
+                        patterns.append({
+                            'type': 'decreasing_spending',
+                            'description': f"Your spending has been decreasing over the last 3 months (average {abs(avg_trend)*100:.1f}% per month)",
+                            'confidence': min(abs(avg_trend), 1.0)
+                        })
+            
+            return patterns
+            
+        except Exception as e:
+            logger.error(f"Error detecting patterns: {e}")
             return []
-        
-        mean_amount = statistics.mean(amounts)
-        std_dev = statistics.stdev(amounts)
-        threshold = mean_amount + (self.anomaly_threshold * std_dev)
-        
-        anomalies = []
-        for receipt in receipts:
-            amount = float(receipt.amount)
-            if amount > threshold:
-                anomalies.append({
-                    'receipt_id': receipt.id,
-                    'vendor': receipt.vendor,
-                    'amount': receipt.amount,
-                    'date': receipt.transaction_date,
-                    'deviation': (amount - mean_amount) / std_dev,
-                    'type': 'high_amount'
-                })
-        
-        # Detect duplicate receipts (potential duplicates)
-        receipt_signatures = {}
-        for receipt in receipts:
-            signature = f"{receipt.vendor}_{receipt.amount}_{receipt.transaction_date.date()}"
-            if signature in receipt_signatures:
-                anomalies.append({
-                    'receipt_id': receipt.id,
-                    'vendor': receipt.vendor,
-                    'amount': receipt.amount,
-                    'date': receipt.transaction_date,
-                    'type': 'potential_duplicate',
-                    'similar_to': receipt_signatures[signature]
-                })
-            else:
-                receipt_signatures[signature] = receipt.id
-        
-        return anomalies
     
-    def _empty_analytics(self) -> AnalyticsData:
-        """Return empty analytics data structure."""
-        return AnalyticsData(
-            total_receipts=0,
-            total_amount=Decimal('0.00'),
-            average_amount=Decimal('0.00'),
-            median_amount=Decimal('0.00'),
-            vendor_stats={},
-            category_stats={},
-            monthly_stats={},
-            currency_stats={},
-            spending_patterns={},
-            anomalies=[]
-        )
-    
-    def get_top_vendors(self, receipts: List[Receipt], limit: int = 10) -> List[Tuple[str, Decimal, int]]:
-        """
-        Get top vendors by total spending.
-        
-        Args:
-            receipts: List of receipts
-            limit: Maximum number of vendors to return
+    def categorize_receipt(self, receipt: Receipt) -> str:
+        """Automatically categorize a receipt based on merchant and items"""
+        try:
+            # Category keywords mapping
+            categories = {
+                'Groceries': ['grocery', 'supermarket', 'market', 'food', 'walmart', 'target', 'kroger', 'safeway'],
+                'Restaurants': ['restaurant', 'cafe', 'coffee', 'pizza', 'burger', 'diner', 'bistro', 'grill'],
+                'Gas': ['gas', 'fuel', 'shell', 'exxon', 'bp', 'chevron', 'mobil'],
+                'Shopping': ['store', 'shop', 'mall', 'retail', 'amazon', 'ebay'],
+                'Healthcare': ['pharmacy', 'medical', 'doctor', 'hospital', 'clinic', 'cvs', 'walgreens'],
+                'Entertainment': ['movie', 'theater', 'cinema', 'game', 'entertainment', 'netflix'],
+                'Transportation': ['uber', 'lyft', 'taxi', 'bus', 'train', 'parking'],
+                'Utilities': ['electric', 'water', 'internet', 'phone', 'utility']
+            }
             
-        Returns:
-            List of tuples (vendor_name, total_amount, transaction_count)
-        """
-        vendor_totals = defaultdict(lambda: {'amount': Decimal('0.00'), 'count': 0})
-        
-        for receipt in receipts:
-            vendor_totals[receipt.vendor]['amount'] += receipt.amount
-            vendor_totals[receipt.vendor]['count'] += 1
-        
-        # Sort by total amount and return top vendors
-        sorted_vendors = sorted(
-            vendor_totals.items(),
-            key=lambda x: x[1]['amount'],
-            reverse=True
-        )
-        
-        return [
-            (vendor, data['amount'], data['count'])
-            for vendor, data in sorted_vendors[:limit]
-        ]
-    
-    def calculate_spending_velocity(self, receipts: List[Receipt], days: int = 30) -> Dict[str, float]:
-        """
-        Calculate spending velocity (rate of spending over time).
-        
-        Args:
-            receipts: List of receipts
-            days: Number of days to analyze
+            text_to_check = ""
+            if receipt.merchant_name:
+                text_to_check += receipt.merchant_name.lower() + " "
+            if receipt.raw_text:
+                text_to_check += receipt.raw_text.lower() + " "
             
-        Returns:
-            Dictionary with velocity metrics
-        """
-        if not receipts:
-            return {'daily_average': 0.0, 'weekly_average': 0.0, 'monthly_average': 0.0}
-        
-        # Filter receipts to specified time period
-        cutoff_date = datetime.now() - timedelta(days=days)
-        recent_receipts = [r for r in receipts if r.transaction_date >= cutoff_date]
-        
-        if not recent_receipts:
-            return {'daily_average': 0.0, 'weekly_average': 0.0, 'monthly_average': 0.0}
-        
-        total_amount = sum(float(r.amount) for r in recent_receipts)
-        actual_days = (datetime.now() - min(r.transaction_date for r in recent_receipts)).days + 1
-        
-        daily_avg = total_amount / actual_days
-        weekly_avg = daily_avg * 7
-        monthly_avg = daily_avg * 30
-        
-        return {
-            'daily_average': daily_avg,
-            'weekly_average': weekly_avg,
-            'monthly_average': monthly_avg,
-            'total_amount': total_amount,
-            'period_days': actual_days
-        }
+            # Score each category
+            category_scores = {}
+            for category, keywords in categories.items():
+                score = sum(1 for keyword in keywords if keyword in text_to_check)
+                if score > 0:
+                    category_scores[category] = score
+            
+            # Return the highest scoring category
+            if category_scores:
+                return max(category_scores, key=category_scores.get)
+            
+            return 'Other'
+            
+        except Exception as e:
+            logger.error(f"Error categorizing receipt: {e}")
+            return 'Other'

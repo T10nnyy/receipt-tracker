@@ -1,521 +1,297 @@
-"""
-File Processing and OCR Module - Advanced Text Extraction
-
-This module implements comprehensive file processing capabilities with hybrid OCR
-approach using PyMuPDF for text-based PDFs and Tesseract for images. Includes
-advanced image preprocessing, pattern recognition, and data extraction algorithms.
-
-Features:
-- Multi-format file support (PDF, images, text)
-- Advanced image preprocessing pipeline
-- Hybrid OCR with fallback mechanisms
-- Intelligent data extraction using regex patterns
-- Confidence scoring and validation
-- Error handling and recovery
-
-Author: Receipt Processing Team
-Version: 1.0.0
-"""
-
-import os
 import re
-import tempfile
 import logging
+from typing import Dict, Any, List, Optional, Tuple
 from datetime import datetime
-from decimal import Decimal, InvalidOperation
-from pathlib import Path
-from typing import Tuple, Optional, List, Dict, Any
 import cv2
 import numpy as np
 import pytesseract
 import fitz  # PyMuPDF
-from PIL import Image, ImageEnhance
-from dateutil import parser as date_parser
+from pathlib import Path
+import io
 
-from .models import Receipt, ProcessingResult, CategoryEnum, CurrencyEnum, classify_category, detect_currency
+from .models import ReceiptItem
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class TextExtractor:
-    """
-    Advanced text extraction engine with hybrid OCR capabilities.
-    
-    Implements intelligent file processing with automatic format detection,
-    image preprocessing, and optimized text extraction for maximum accuracy.
-    """
+    """Extracts and processes text from receipt images and PDFs"""
     
     def __init__(self):
-        """Initialize the text extractor with default configurations."""
-        self.supported_formats = {'.pdf', '.jpg', '.jpeg', '.png', '.tiff', '.bmp', '.txt'}
-        self.max_file_size = 10 * 1024 * 1024  # 10MB
+        self.tesseract_config = '--oem 3 --psm 6 -c tessedit_char_whitelist=0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz.,/$-: '
         
-        # OCR configuration
-        self.tesseract_config = '--oem 3 --psm 6 -c tessedit_char_whitelist=0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz.,/$€£¥-: '
-        
-        # Regex patterns for data extraction
-        self.amount_patterns = [
-            r'\$\s*(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)',  # $123.45, $1,234.56
-            r'(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)\s*\$',  # 123.45$
-            r'TOTAL[:\s]*\$?\s*(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)',  # TOTAL: $123.45
-            r'AMOUNT[:\s]*\$?\s*(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)',  # AMOUNT: 123.45
-            r'(\d{1,3}(?:,\d{3})*\.\d{2})',  # Generic decimal amounts
-        ]
-        
-        self.date_patterns = [
-            r'\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b',  # MM/DD/YYYY, MM-DD-YY
-            r'\b(\d{4}[/-]\d{1,2}[/-]\d{1,2})\b',    # YYYY/MM/DD
-            r'\b([A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4})\b',  # Month DD, YYYY
-            r'\b(\d{1,2}\s+[A-Za-z]{3,9}\s+\d{4})\b',    # DD Month YYYY
-        ]
-        
-        self.vendor_stop_words = {
-            'receipt', 'invoice', 'bill', 'total', 'amount', 'date', 'time',
-            'thank', 'you', 'visit', 'again', 'store', 'location', 'address'
+        # Common patterns for receipt parsing
+        self.patterns = {
+            'total': [
+                r'total[:\s]*\$?(\d+\.?\d*)',
+                r'amount[:\s]*\$?(\d+\.?\d*)',
+                r'sum[:\s]*\$?(\d+\.?\d*)',
+                r'\$(\d+\.\d{2})\s*$'
+            ],
+            'date': [
+                r'(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})',
+                r'(\d{4}[/-]\d{1,2}[/-]\d{1,2})',
+                r'(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+\d{1,2},?\s+\d{4}',
+                r'\d{1,2}\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+\d{4}'
+            ],
+            'merchant': [
+                r'^([A-Z][A-Za-z\s&]+)(?=\n|\r)',
+                r'([A-Z][A-Za-z\s&]{3,})\s*(?:store|shop|market|restaurant|cafe)',
+            ],
+            'items': [
+                r'([A-Za-z][A-Za-z\s]+)\s+(\d+\.?\d*)\s*\$?(\d+\.\d{2})',
+                r'([A-Za-z][A-Za-z\s]+)\s+\$?(\d+\.\d{2})',
+            ]
         }
     
-    def process_file(self, file_path: str, filename: str) -> ProcessingResult:
-        """
-        Process uploaded file and extract receipt data.
-        
-        Args:
-            file_path: Path to the uploaded file
-            filename: Original filename
-            
-        Returns:
-            ProcessingResult with extracted receipt data or error information
-        """
-        start_time = datetime.now()
-        
+    def extract_from_file(self, file_path: str) -> Dict[str, Any]:
+        """Extract text and information from a file (image or PDF)"""
         try:
-            # Validate file
-            if not self._validate_file(file_path, filename):
-                return ProcessingResult(
-                    success=False,
-                    error_message="File validation failed"
-                )
+            file_path = Path(file_path)
             
-            # Extract text based on file type
-            file_extension = Path(filename).suffix.lower()
+            if not file_path.exists():
+                return {'success': False, 'error': 'File not found'}
             
-            if file_extension == '.pdf':
-                text, confidence = self._process_pdf(file_path)
-            elif file_extension in ['.jpg', '.jpeg', '.png', '.tiff', '.bmp']:
-                text, confidence = self._process_image(file_path)
-            elif file_extension == '.txt':
-                text, confidence = self._process_text_file(file_path)
+            # Determine file type and extract text
+            if file_path.suffix.lower() == '.pdf':
+                text = self._extract_from_pdf(file_path)
             else:
-                return ProcessingResult(
-                    success=False,
-                    error_message=f"Unsupported file format: {file_extension}"
-                )
+                text = self._extract_from_image(file_path)
             
             if not text.strip():
-                return ProcessingResult(
-                    success=False,
-                    error_message="No text could be extracted from the file"
-                )
+                return {'success': False, 'error': 'No text could be extracted'}
             
-            # Extract structured data
-            receipt = self._extract_receipt_data(text, filename)
-            receipt.confidence_score = confidence
-            receipt.extracted_text = text
+            # Parse extracted text
+            parsed_data = self._parse_receipt_text(text)
             
-            processing_time = (datetime.now() - start_time).total_seconds()
-            
-            return ProcessingResult(
-                success=True,
-                receipt=receipt,
-                processing_time=processing_time
-            )
+            return {
+                'success': True,
+                'text': text,
+                **parsed_data
+            }
             
         except Exception as e:
-            logger.error(f"Processing failed for {filename}: {e}")
-            return ProcessingResult(
-                success=False,
-                error_message=f"Processing error: {str(e)}"
-            )
+            logger.error(f"Error extracting from file {file_path}: {e}")
+            return {'success': False, 'error': str(e)}
     
-    def _validate_file(self, file_path: str, filename: str) -> bool:
-        """Validate file format and size."""
-        try:
-            # Check file extension
-            file_extension = Path(filename).suffix.lower()
-            if file_extension not in self.supported_formats:
-                logger.error(f"Unsupported file format: {file_extension}")
-                return False
-            
-            # Check file size
-            file_size = os.path.getsize(file_path)
-            if file_size > self.max_file_size:
-                logger.error(f"File too large: {file_size} bytes")
-                return False
-            
-            # Check if file exists and is readable
-            if not os.path.isfile(file_path):
-                logger.error(f"File not found: {file_path}")
-                return False
-            
-            return True
-            
-        except Exception as e:
-            logger.error(f"File validation error: {e}")
-            return False
-    
-    def _process_pdf(self, file_path: str) -> Tuple[str, float]:
-        """
-        Process PDF file with hybrid text extraction.
-        
-        First attempts direct text extraction, falls back to OCR if needed.
-        """
-        try:
-            doc = fitz.open(file_path)
-            text = ""
-            confidence = 1.0  # High confidence for direct text extraction
-            
-            # Try direct text extraction first
-            for page_num in range(len(doc)):
-                page = doc.load_page(page_num)
-                page_text = page.get_text()
-                text += page_text + "\n"
-            
-            doc.close()
-            
-            # If direct extraction yields little text, try OCR
-            if len(text.strip()) < 50:
-                logger.info("Direct PDF text extraction yielded little text, trying OCR")
-                text, confidence = self._pdf_to_ocr(file_path)
-            
-            return text, confidence
-            
-        except Exception as e:
-            logger.error(f"PDF processing error: {e}")
-            # Fallback to OCR
-            return self._pdf_to_ocr(file_path)
-    
-    def _pdf_to_ocr(self, file_path: str) -> Tuple[str, float]:
-        """Convert PDF to images and perform OCR."""
-        try:
-            doc = fitz.open(file_path)
-            text = ""
-            confidences = []
-            
-            for page_num in range(len(doc)):
-                page = doc.load_page(page_num)
-                
-                # Convert page to image
-                mat = fitz.Matrix(2, 2)  # 2x zoom for better quality
-                pix = page.get_pixmap(matrix=mat)
-                img_data = pix.tobytes("png")
-                
-                # Save to temporary file for OCR
-                with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as temp_file:
-                    temp_file.write(img_data)
-                    temp_path = temp_file.name
-                
-                try:
-                    # Perform OCR on the image
-                    page_text, page_confidence = self._process_image(temp_path)
-                    text += page_text + "\n"
-                    confidences.append(page_confidence)
-                finally:
-                    os.unlink(temp_path)
-            
-            doc.close()
-            
-            # Calculate average confidence
-            avg_confidence = sum(confidences) / len(confidences) if confidences else 0.0
-            return text, avg_confidence
-            
-        except Exception as e:
-            logger.error(f"PDF OCR processing error: {e}")
-            return "", 0.0
-    
-    def _process_image(self, file_path: str) -> Tuple[str, float]:
-        """
-        Process image file with advanced preprocessing and OCR.
-        
-        Applies image enhancement techniques for optimal OCR accuracy.
-        """
+    def _extract_from_image(self, image_path: Path) -> str:
+        """Extract text from image using OCR"""
         try:
             # Load and preprocess image
-            processed_image = self._preprocess_image(file_path)
-            
-            # Perform OCR with confidence scoring
-            ocr_data = pytesseract.image_to_data(
-                processed_image,
-                config=self.tesseract_config,
-                output_type=pytesseract.Output.DICT
-            )
-            
-            # Extract text and calculate confidence
-            text_parts = []
-            confidences = []
-            
-            for i, word in enumerate(ocr_data['text']):
-                if word.strip():
-                    text_parts.append(word)
-                    conf = int(ocr_data['conf'][i])
-                    if conf > 0:  # Only include positive confidence scores
-                        confidences.append(conf)
-            
-            text = ' '.join(text_parts)
-            avg_confidence = sum(confidences) / len(confidences) / 100.0 if confidences else 0.0
-            
-            return text, avg_confidence
-            
-        except Exception as e:
-            logger.error(f"Image processing error: {e}")
-            return "", 0.0
-    
-    def _preprocess_image(self, file_path: str) -> np.ndarray:
-        """
-        Advanced image preprocessing pipeline for optimal OCR.
-        
-        Applies perspective correction, noise removal, and enhancement techniques.
-        """
-        try:
-            # Load image
-            image = cv2.imread(file_path)
+            image = cv2.imread(str(image_path))
             if image is None:
                 raise ValueError("Could not load image")
             
+            processed_image = self.preprocess_image(image)
+            
+            # Extract text using Tesseract
+            text = pytesseract.image_to_string(processed_image, config=self.tesseract_config)
+            
+            return text.strip()
+            
+        except Exception as e:
+            logger.error(f"Error extracting text from image: {e}")
+            raise
+    
+    def _extract_from_pdf(self, pdf_path: Path) -> str:
+        """Extract text from PDF"""
+        try:
+            text = ""
+            doc = fitz.open(pdf_path)
+            
+            for page_num in range(doc.page_count):
+                page = doc[page_num]
+                
+                # Try text extraction first
+                page_text = page.get_text()
+                
+                if page_text.strip():
+                    text += page_text + "\n"
+                else:
+                    # If no text, try OCR on page image
+                    pix = page.get_pixmap()
+                    img_data = pix.tobytes("png")
+                    img = Image.open(io.BytesIO(img_data))
+                    
+                    # Convert PIL to OpenCV format
+                    img_cv = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+                    processed_img = self.preprocess_image(img_cv)
+                    
+                    ocr_text = pytesseract.image_to_string(processed_img, config=self.tesseract_config)
+                    text += ocr_text + "\n"
+            
+            doc.close()
+            return text.strip()
+            
+        except Exception as e:
+            logger.error(f"Error extracting text from PDF: {e}")
+            raise
+    
+    def preprocess_image(self, image: np.ndarray) -> np.ndarray:
+        """Preprocess image for better OCR results"""
+        try:
             # Convert to grayscale
-            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            if len(image.shape) == 3:
+                gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            else:
+                gray = image.copy()
             
-            # Apply perspective correction if needed
-            corrected = self._correct_perspective(gray)
+            # Apply denoising
+            denoised = cv2.fastNlMeansDenoising(gray)
             
-            # Noise removal
-            denoised = cv2.medianBlur(corrected, 3)
-            
-            # Adaptive thresholding for better text contrast
-            binary = cv2.adaptiveThreshold(
+            # Apply adaptive thresholding
+            thresh = cv2.adaptiveThreshold(
                 denoised, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2
             )
             
-            # Morphological operations to clean up text
+            # Apply morphological operations to clean up
             kernel = np.ones((1, 1), np.uint8)
-            cleaned = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+            cleaned = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
             
-            # Enhance contrast
-            enhanced = cv2.convertScaleAbs(cleaned, alpha=1.2, beta=10)
+            # Resize if image is too small
+            height, width = cleaned.shape
+            if height < 300 or width < 300:
+                scale_factor = max(300 / height, 300 / width)
+                new_width = int(width * scale_factor)
+                new_height = int(height * scale_factor)
+                cleaned = cv2.resize(cleaned, (new_width, new_height), interpolation=cv2.INTER_CUBIC)
             
-            return enhanced
-            
-        except Exception as e:
-            logger.error(f"Image preprocessing error: {e}")
-            # Return original image if preprocessing fails
-            return cv2.imread(file_path, cv2.IMREAD_GRAYSCALE)
-    
-    def _correct_perspective(self, image: np.ndarray) -> np.ndarray:
-        """
-        Detect and correct perspective distortion in receipt images.
-        
-        Uses edge detection and contour analysis to find receipt boundaries.
-        """
-        try:
-            # Edge detection
-            edges = cv2.Canny(image, 50, 150, apertureSize=3)
-            
-            # Find contours
-            contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            
-            # Find the largest rectangular contour (likely the receipt)
-            for contour in sorted(contours, key=cv2.contourArea, reverse=True):
-                # Approximate contour to polygon
-                epsilon = 0.02 * cv2.arcLength(contour, True)
-                approx = cv2.approxPolyDP(contour, epsilon, True)
-                
-                # If we found a quadrilateral, apply perspective correction
-                if len(approx) == 4:
-                    return self._apply_perspective_transform(image, approx)
-            
-            # If no quadrilateral found, return original
-            return image
+            return cleaned
             
         except Exception as e:
-            logger.error(f"Perspective correction error: {e}")
+            logger.error(f"Error preprocessing image: {e}")
             return image
     
-    def _apply_perspective_transform(self, image: np.ndarray, corners: np.ndarray) -> np.ndarray:
-        """Apply perspective transformation to correct skewed receipts."""
+    def _parse_receipt_text(self, text: str) -> Dict[str, Any]:
+        """Parse receipt text to extract structured information"""
+        result = {
+            'total_amount': None,
+            'merchant_name': None,
+            'date': None,
+            'items': []
+        }
+        
         try:
-            # Order corners: top-left, top-right, bottom-right, bottom-left
-            corners = corners.reshape(4, 2)
+            # Clean text
+            lines = [line.strip() for line in text.split('\n') if line.strip()]
+            text_lower = text.lower()
             
-            # Calculate dimensions of the corrected image
-            width = max(
-                np.linalg.norm(corners[0] - corners[1]),
-                np.linalg.norm(corners[2] - corners[3])
-            )
-            height = max(
-                np.linalg.norm(corners[0] - corners[3]),
-                np.linalg.norm(corners[1] - corners[2])
-            )
+            # Extract total amount
+            result['total_amount'] = self._extract_total(text_lower)
             
-            # Define destination points
-            dst_corners = np.array([
-                [0, 0],
-                [width - 1, 0],
-                [width - 1, height - 1],
-                [0, height - 1]
-            ], dtype=np.float32)
+            # Extract merchant name
+            result['merchant_name'] = self._extract_merchant(lines)
             
-            # Calculate perspective transform matrix
-            matrix = cv2.getPerspectiveTransform(corners.astype(np.float32), dst_corners)
+            # Extract date
+            result['date'] = self._extract_date(text)
             
-            # Apply transformation
-            corrected = cv2.warpPerspective(image, matrix, (int(width), int(height)))
+            # Extract items
+            result['items'] = self._extract_items(lines)
             
-            return corrected
+            return result
             
         except Exception as e:
-            logger.error(f"Perspective transform error: {e}")
-            return image
+            logger.error(f"Error parsing receipt text: {e}")
+            return result
     
-    def _process_text_file(self, file_path: str) -> Tuple[str, float]:
-        """Process plain text file."""
-        try:
-            with open(file_path, 'r', encoding='utf-8') as file:
-                text = file.read()
-            return text, 1.0  # High confidence for direct text
-            
-        except UnicodeDecodeError:
-            # Try with different encoding
-            try:
-                with open(file_path, 'r', encoding='latin-1') as file:
-                    text = file.read()
-                return text, 0.9  # Slightly lower confidence
-            except Exception as e:
-                logger.error(f"Text file processing error: {e}")
-                return "", 0.0
-        except Exception as e:
-            logger.error(f"Text file processing error: {e}")
-            return "", 0.0
+    def _extract_total(self, text: str) -> Optional[float]:
+        """Extract total amount from text"""
+        for pattern in self.patterns['total']:
+            matches = re.findall(pattern, text, re.IGNORECASE)
+            if matches:
+                try:
+                    # Get the last match (usually the final total)
+                    amount_str = matches[-1].replace('$', '').replace(',', '')
+                    return float(amount_str)
+                except (ValueError, IndexError):
+                    continue
+        return None
     
-    def _extract_receipt_data(self, text: str, filename: str) -> Receipt:
-        """
-        Extract structured receipt data from text using pattern matching.
-        
-        Uses regex patterns and heuristics to identify vendor, date, amount, and category.
-        """
-        # Extract vendor (usually in the first few lines)
-        vendor = self._extract_vendor(text)
-        
-        # Extract transaction date
-        transaction_date = self._extract_date(text)
-        
-        # Extract amount
-        amount = self._extract_amount(text)
-        
-        # Classify category
-        category = classify_category(text, vendor)
-        
-        # Detect currency
-        currency = detect_currency(text)
-        
-        return Receipt(
-            vendor=vendor,
-            transaction_date=transaction_date,
-            amount=amount,
-            category=category,
-            currency=currency,
-            source_file=filename,
-            extracted_text=text,
-            confidence_score=0.0  # Will be set by caller
-        )
-    
-    def _extract_vendor(self, text: str) -> str:
-        """
-        Extract vendor name using heuristic analysis.
-        
-        Looks for vendor name in the first few lines, filtering out common receipt terms.
-        """
-        lines = [line.strip() for line in text.split('\n') if line.strip()]
-        
-        if not lines:
-            return "Unknown Vendor"
-        
-        # Check first few lines for vendor name
+    def _extract_merchant(self, lines: List[str]) -> Optional[str]:
+        """Extract merchant name from text lines"""
+        # Usually the merchant name is in the first few lines
         for line in lines[:5]:
-            # Clean the line
-            cleaned_line = re.sub(r'[^\w\s&\'-]', ' ', line)
-            words = cleaned_line.lower().split()
+            line = line.strip()
+            if len(line) > 3 and not re.match(r'^\d', line):
+                # Clean up common receipt artifacts
+                cleaned = re.sub(r'[^\w\s&-]', '', line)
+                if len(cleaned) > 3:
+                    return cleaned.title()
+        return None
+    
+    def _extract_date(self, text: str) -> Optional[datetime]:
+        """Extract date from text"""
+        for pattern in self.patterns['date']:
+            matches = re.findall(pattern, text, re.IGNORECASE)
+            if matches:
+                for match in matches:
+                    try:
+                        # Try different date formats
+                        date_str = match if isinstance(match, str) else match[0]
+                        
+                        # Common date formats
+                        formats = [
+                            '%m/%d/%Y', '%m-%d-%Y', '%m/%d/%y', '%m-%d-%y',
+                            '%Y/%m/%d', '%Y-%m-%d',
+                            '%d/%m/%Y', '%d-%m-%Y',
+                            '%B %d, %Y', '%b %d, %Y',
+                            '%d %B %Y', '%d %b %Y'
+                        ]
+                        
+                        for fmt in formats:
+                            try:
+                                return datetime.strptime(date_str, fmt)
+                            except ValueError:
+                                continue
+                                
+                    except Exception:
+                        continue
+        return None
+    
+    def _extract_items(self, lines: List[str]) -> List[ReceiptItem]:
+        """Extract individual items from receipt lines"""
+        items = []
+        
+        for line in lines:
+            line = line.strip()
+            if not line or len(line) < 3:
+                continue
             
-            # Filter out stop words and short words
-            filtered_words = [
-                word for word in words 
-                if len(word) > 2 and word not in self.vendor_stop_words
+            # Look for patterns like "Item Name 1.99" or "Item Name 2 $3.98"
+            patterns = [
+                r'^([A-Za-z][A-Za-z\s]+?)\s+(\d+)\s*\$?(\d+\.\d{2})$',  # Item Qty Price
+                r'^([A-Za-z][A-Za-z\s]+?)\s+\$?(\d+\.\d{2})$',  # Item Price
+                r'^([A-Za-z][A-Za-z\s]+?)\s+(\d+\.\d{2})\s*$',  # Item Price (no $)
             ]
             
-            # If we have meaningful words, this might be the vendor
-            if filtered_words and len(' '.join(filtered_words)) > 3:
-                vendor_name = ' '.join(word.title() for word in filtered_words)
-                if len(vendor_name) <= 200:  # Respect max length
-                    return vendor_name
-        
-        # Fallback: use first non-empty line
-        return lines[0][:200] if lines[0] else "Unknown Vendor"
-    
-    def _extract_date(self, text: str) -> datetime:
-        """
-        Extract transaction date using multiple pattern matching strategies.
-        
-        Tries various date formats and returns the most likely transaction date.
-        """
-        dates_found = []
-        
-        # Try each date pattern
-        for pattern in self.date_patterns:
-            matches = re.findall(pattern, text, re.IGNORECASE)
-            for match in matches:
-                try:
-                    # Parse date using dateutil for flexibility
-                    parsed_date = date_parser.parse(match, fuzzy=True)
+            for pattern in patterns:
+                match = re.match(pattern, line)
+                if match:
+                    groups = match.groups()
                     
-                    # Validate date is reasonable (not in future, not too old)
-                    if parsed_date <= datetime.now() and parsed_date.year >= 2000:
-                        dates_found.append(parsed_date)
-                        
-                except (ValueError, TypeError):
-                    continue
-        
-        # Return the most recent valid date, or current date if none found
-        if dates_found:
-            return max(dates_found)
-        else:
-            logger.warning("No valid date found in text, using current date")
-            return datetime.now()
-    
-    def _extract_amount(self, text: str) -> Decimal:
-        """
-        Extract transaction amount using pattern matching and validation.
-        
-        Looks for monetary amounts and returns the most likely total amount.
-        """
-        amounts_found = []
-        
-        # Try each amount pattern
-        for pattern in self.amount_patterns:
-            matches = re.findall(pattern, text, re.IGNORECASE)
-            for match in matches:
-                try:
-                    # Clean the amount string
-                    amount_str = match.replace(',', '').replace('$', '').strip()
-                    amount = Decimal(amount_str)
+                    if len(groups) == 3:  # Item, Qty, Price
+                        name, qty, price = groups
+                        try:
+                            items.append(ReceiptItem(
+                                name=name.strip().title(),
+                                quantity=int(qty),
+                                price=float(price)
+                            ))
+                            break
+                        except ValueError:
+                            continue
                     
-                    # Validate amount is reasonable
-                    if Decimal('0.01') <= amount <= Decimal('10000.00'):
-                        amounts_found.append(amount)
-                        
-                except (InvalidOperation, ValueError):
-                    continue
+                    elif len(groups) == 2:  # Item, Price
+                        name, price = groups
+                        try:
+                            items.append(ReceiptItem(
+                                name=name.strip().title(),
+                                quantity=1,
+                                price=float(price)
+                            ))
+                            break
+                        except ValueError:
+                            continue
         
-        # Return the largest amount found (likely the total), or default
-        if amounts_found:
-            return max(amounts_found)
-        else:
-            logger.warning("No valid amount found in text, using default")
-            return Decimal('0.01')  # Minimum valid amount
+        return items

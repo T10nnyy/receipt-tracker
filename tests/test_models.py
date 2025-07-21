@@ -9,7 +9,7 @@ Version: 1.0.0
 """
 
 import unittest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from decimal import Decimal
 from pathlib import Path
 import pytest
@@ -22,8 +22,8 @@ sys.path.insert(0, str(src_path))
 
 from core.models import (
     Receipt, CategoryEnum, CurrencyEnum, ProcessingResult, 
-    SearchFilters, AnalyticsData, FileUploadData,
-    classify_category, detect_currency
+    SearchFilters, AnalyticsData, FileUploadData, ReceiptSearchFilter,
+    classify_category, detect_currency, ReceiptItem
 )
 
 class TestReceiptModel(unittest.TestCase):
@@ -44,13 +44,19 @@ class TestReceiptModel(unittest.TestCase):
     
     def test_valid_receipt_creation(self):
         """Test creating a valid receipt."""
-        receipt = Receipt(**self.valid_receipt_data)
+        receipt = Receipt(
+            vendor="Test Store",
+            transaction_date=date(2023, 1, 15),
+            amount=25.50,
+            items=["Item 1", "Item 2"],
+            category="Groceries",
+            payment_method="Credit Card"
+        )
         
-        self.assertEqual(receipt.vendor, 'Test Vendor')
-        self.assertEqual(receipt.amount, Decimal('25.99'))
-        self.assertEqual(receipt.category, CategoryEnum.GROCERIES)
-        self.assertEqual(receipt.currency, CurrencyEnum.USD)
-        self.assertEqual(receipt.confidence_score, 0.95)
+        self.assertEqual(receipt.vendor, "Test Store")
+        self.assertEqual(receipt.amount, 25.50)
+        self.assertEqual(receipt.category, "Groceries")
+        self.assertEqual(len(receipt.items), 2)
     
     def test_receipt_with_defaults(self):
         """Test receipt creation with default values."""
@@ -195,6 +201,173 @@ class TestReceiptModel(unittest.TestCase):
         self.assertEqual(receipt.amount, Decimal('25.99'))
         self.assertEqual(receipt.category, CategoryEnum.GROCERIES)
         self.assertIsInstance(receipt.transaction_date, datetime)
+    
+    def test_vendor_validation(self):
+        """Test vendor name validation."""
+        # Test empty vendor
+        with self.assertRaises(ValidationError):
+            Receipt(
+                vendor="",
+                transaction_date=date(2023, 1, 15),
+                amount=25.50
+            )
+        
+        # Test whitespace-only vendor
+        with self.assertRaises(ValidationError):
+            Receipt(
+                vendor="   ",
+                transaction_date=date(2023, 1, 15),
+                amount=25.50
+            )
+        
+        # Test vendor name cleaning
+        receipt = Receipt(
+            vendor="  test store  ",
+            transaction_date=date(2023, 1, 15),
+            amount=25.50
+        )
+        self.assertEqual(receipt.vendor, "Test Store")
+    
+    def test_amount_validation(self):
+        """Test amount validation."""
+        # Test negative amount
+        with self.assertRaises(ValidationError):
+            Receipt(
+                vendor="Test Store",
+                transaction_date=date(2023, 1, 15),
+                amount=-5.00
+            )
+        
+        # Test zero amount
+        with self.assertRaises(ValidationError):
+            Receipt(
+                vendor="Test Store",
+                transaction_date=date(2023, 1, 15),
+                amount=0.00
+            )
+        
+        # Test very large amount
+        with self.assertRaises(ValidationError):
+            Receipt(
+                vendor="Test Store",
+                transaction_date=date(2023, 1, 15),
+                amount=150000.00
+            )
+        
+        # Test amount rounding
+        receipt = Receipt(
+            vendor="Test Store",
+            transaction_date=date(2023, 1, 15),
+            amount=25.555
+        )
+        self.assertEqual(receipt.amount, 25.56)
+    
+    def test_category_validation(self):
+        """Test category validation."""
+        # Test valid category
+        receipt = Receipt(
+            vendor="Test Store",
+            transaction_date=date(2023, 1, 15),
+            amount=25.50,
+            category="Food & Dining"
+        )
+        self.assertEqual(receipt.category, "Food & Dining")
+        
+        # Test invalid category (should default to "Other")
+        receipt = Receipt(
+            vendor="Test Store",
+            transaction_date=date(2023, 1, 15),
+            amount=25.50,
+            category="Invalid Category"
+        )
+        self.assertEqual(receipt.category, "Other")
+    
+    def test_payment_method_validation(self):
+        """Test payment method validation."""
+        # Test valid payment method
+        receipt = Receipt(
+            vendor="Test Store",
+            transaction_date=date(2023, 1, 15),
+            amount=25.50,
+            payment_method="Credit Card"
+        )
+        self.assertEqual(receipt.payment_method, "Credit Card")
+        
+        # Test invalid payment method (should default to "Unknown")
+        receipt = Receipt(
+            vendor="Test Store",
+            transaction_date=date(2023, 1, 15),
+            amount=25.50,
+            payment_method="Invalid Method"
+        )
+        self.assertEqual(receipt.payment_method, "Unknown")
+    
+    def test_items_validation(self):
+        """Test items list validation."""
+        # Test empty items
+        receipt = Receipt(
+            vendor="Test Store",
+            transaction_date=date(2023, 1, 15),
+            amount=25.50,
+            items=[]
+        )
+        self.assertEqual(receipt.items, [])
+        
+        # Test items cleaning (remove empty strings)
+        receipt = Receipt(
+            vendor="Test Store",
+            transaction_date=date(2023, 1, 15),
+            amount=25.50,
+            items=["Item 1", "", "  ", "Item 2", "Item 3"]
+        )
+        self.assertEqual(receipt.items, ["Item 1", "Item 2", "Item 3"])
+        
+        # Test items limit (should limit to 50 items)
+        many_items = [f"Item {i}" for i in range(100)]
+        receipt = Receipt(
+            vendor="Test Store",
+            transaction_date=date(2023, 1, 15),
+            amount=25.50,
+            items=many_items
+        )
+        self.assertEqual(len(receipt.items), 50)
+    
+    def test_to_dict(self):
+        """Test converting receipt to dictionary."""
+        receipt = Receipt(
+            vendor="Test Store",
+            transaction_date=date(2023, 1, 15),
+            amount=25.50,
+            items=["Item 1", "Item 2"],
+            category="Groceries",
+            payment_method="Credit Card"
+        )
+        
+        receipt_dict = receipt.to_dict()
+        
+        self.assertIsInstance(receipt_dict, dict)
+        self.assertEqual(receipt_dict['vendor'], "Test Store")
+        self.assertEqual(receipt_dict['amount'], 25.50)
+        self.assertEqual(receipt_dict['transaction_date'], "2023-01-15")
+        self.assertEqual(receipt_dict['items'], ["Item 1", "Item 2"])
+    
+    def test_from_dict(self):
+        """Test creating receipt from dictionary."""
+        receipt_data = {
+            'vendor': "Test Store",
+            'transaction_date': "2023-01-15",
+            'amount': 25.50,
+            'items': ["Item 1", "Item 2"],
+            'category': "Groceries",
+            'payment_method': "Credit Card"
+        }
+        
+        receipt = Receipt.from_dict(receipt_data)
+        
+        self.assertEqual(receipt.vendor, "Test Store")
+        self.assertEqual(receipt.amount, 25.50)
+        self.assertEqual(receipt.transaction_date, date(2023, 1, 15))
+        self.assertEqual(receipt.items, ["Item 1", "Item 2"])
 
 class TestSearchFilters(unittest.TestCase):
     """Test suite for SearchFilters model."""
@@ -399,6 +572,212 @@ class TestEnumValues(unittest.TestCase):
         
         actual_currencies = {curr.value for curr in CurrencyEnum}
         self.assertEqual(actual_currencies, expected_currencies)
+
+class TestReceiptSearchFilter(unittest.TestCase):
+    """Test cases for ReceiptSearchFilter model."""
+    
+    def test_valid_search_filter(self):
+        """Test creating a valid search filter."""
+        search_filter = ReceiptSearchFilter(
+            query="test",
+            vendor="Test Store",
+            category="Groceries",
+            min_amount=10.0,
+            max_amount=50.0,
+            start_date=date(2023, 1, 1),
+            end_date=date(2023, 12, 31)
+        )
+        
+        self.assertEqual(search_filter.query, "test")
+        self.assertEqual(search_filter.vendor, "Test Store")
+        self.assertEqual(search_filter.min_amount, 10.0)
+        self.assertEqual(search_filter.max_amount, 50.0)
+    
+    def test_empty_search_filter(self):
+        """Test creating an empty search filter."""
+        search_filter = ReceiptSearchFilter()
+        
+        self.assertIsNone(search_filter.query)
+        self.assertIsNone(search_filter.vendor)
+        self.assertIsNone(search_filter.min_amount)
+        self.assertIsNone(search_filter.max_amount)
+    
+    def test_amount_validation(self):
+        """Test amount validation in search filter."""
+        # Test negative amounts
+        with self.assertRaises(ValidationError):
+            ReceiptSearchFilter(min_amount=-10.0)
+        
+        with self.assertRaises(ValidationError):
+            ReceiptSearchFilter(max_amount=-5.0)
+    
+    def test_date_range_validation(self):
+        """Test date range validation."""
+        # Test invalid date range (end before start)
+        with self.assertRaises(ValidationError):
+            ReceiptSearchFilter(
+                start_date=date(2023, 12, 31),
+                end_date=date(2023, 1, 1)
+            )
+        
+        # Test valid date range
+        search_filter = ReceiptSearchFilter(
+            start_date=date(2023, 1, 1),
+            end_date=date(2023, 12, 31)
+        )
+        self.assertEqual(search_filter.start_date, date(2023, 1, 1))
+        self.assertEqual(search_filter.end_date, date(2023, 12, 31))
+
+class TestReceiptItem(unittest.TestCase):
+    
+    def test_receipt_item_creation(self):
+        """Test creating a receipt item"""
+        item = ReceiptItem(
+            name="Test Item",
+            price=5.99,
+            quantity=2,
+            category="Food"
+        )
+        
+        self.assertEqual(item.name, "Test Item")
+        self.assertEqual(item.price, 5.99)
+        self.assertEqual(item.quantity, 2)
+        self.assertEqual(item.category, "Food")
+    
+    def test_receipt_item_defaults(self):
+        """Test receipt item default values"""
+        item = ReceiptItem(name="Test Item", price=5.99)
+        
+        self.assertEqual(item.quantity, 1)
+        self.assertIsNone(item.category)
+    
+    def test_receipt_item_validation(self):
+        """Test receipt item validation"""
+        # Test negative price
+        with self.assertRaises(ValueError):
+            ReceiptItem(name="Test Item", price=-5.99)
+        
+        # Test negative quantity
+        with self.assertRaises(ValueError):
+            ReceiptItem(name="Test Item", price=5.99, quantity=-1)
+
+class TestReceipt(unittest.TestCase):
+    
+    def setUp(self):
+        """Set up test data"""
+        self.test_items = [
+            ReceiptItem(name="Item 1", price=5.99, quantity=1),
+            ReceiptItem(name="Item 2", price=3.50, quantity=2)
+        ]
+        
+        self.test_receipt = Receipt(
+            filename="test_receipt.jpg",
+            raw_text="Test receipt text",
+            upload_date=datetime(2024, 1, 1, 12, 0, 0),
+            merchant_name="Test Store",
+            receipt_date=datetime(2024, 1, 1),
+            total_amount=12.99,
+            tax_amount=1.00,
+            items=self.test_items,
+            category="Groceries",
+            notes="Test notes"
+        )
+    
+    def test_receipt_creation(self):
+        """Test creating a receipt"""
+        self.assertEqual(self.test_receipt.filename, "test_receipt.jpg")
+        self.assertEqual(self.test_receipt.merchant_name, "Test Store")
+        self.assertEqual(self.test_receipt.total_amount, 12.99)
+        self.assertEqual(len(self.test_receipt.items), 2)
+    
+    def test_receipt_id_generation(self):
+        """Test automatic ID generation"""
+        receipt = Receipt(
+            filename="test.jpg",
+            raw_text="test",
+            upload_date=datetime.now()
+        )
+        
+        self.assertIsNotNone(receipt.id)
+        self.assertIsInstance(receipt.id, str)
+    
+    def test_receipt_validation(self):
+        """Test receipt validation"""
+        # Test negative total amount
+        with self.assertRaises(ValueError):
+            Receipt(
+                filename="test.jpg",
+                raw_text="test",
+                upload_date=datetime.now(),
+                total_amount=-10.00
+            )
+        
+        # Test negative tax amount
+        with self.assertRaises(ValueError):
+            Receipt(
+                filename="test.jpg",
+                raw_text="test",
+                upload_date=datetime.now(),
+                tax_amount=-1.00
+            )
+    
+    def test_receipt_to_dict(self):
+        """Test converting receipt to dictionary"""
+        receipt_dict = self.test_receipt.to_dict()
+        
+        self.assertEqual(receipt_dict['filename'], "test_receipt.jpg")
+        self.assertEqual(receipt_dict['merchant_name'], "Test Store")
+        self.assertEqual(receipt_dict['total_amount'], 12.99)
+        self.assertEqual(len(receipt_dict['items']), 2)
+        
+        # Test item conversion
+        first_item = receipt_dict['items'][0]
+        self.assertEqual(first_item['name'], "Item 1")
+        self.assertEqual(first_item['price'], 5.99)
+    
+    def test_receipt_from_dict(self):
+        """Test creating receipt from dictionary"""
+        receipt_dict = self.test_receipt.to_dict()
+        reconstructed_receipt = Receipt.from_dict(receipt_dict)
+        
+        self.assertEqual(reconstructed_receipt.filename, self.test_receipt.filename)
+        self.assertEqual(reconstructed_receipt.merchant_name, self.test_receipt.merchant_name)
+        self.assertEqual(reconstructed_receipt.total_amount, self.test_receipt.total_amount)
+        self.assertEqual(len(reconstructed_receipt.items), len(self.test_receipt.items))
+        
+        # Test item reconstruction
+        first_item = reconstructed_receipt.items[0]
+        self.assertEqual(first_item.name, "Item 1")
+        self.assertEqual(first_item.price, 5.99)
+    
+    def test_receipt_minimal_data(self):
+        """Test receipt with minimal required data"""
+        minimal_receipt = Receipt(
+            filename="minimal.jpg",
+            raw_text="minimal text",
+            upload_date=datetime.now()
+        )
+        
+        self.assertIsNotNone(minimal_receipt.id)
+        self.assertEqual(minimal_receipt.filename, "minimal.jpg")
+        self.assertIs(minimal_receipt.merchant_name, None)
+        self.assertIs(minimal_receipt.total_amount, None)
+        self.assertEqual(len(minimal_receipt.items), 0)
+    
+    def test_receipt_serialization_roundtrip(self):
+        """Test full serialization roundtrip"""
+        # Convert to dict and back
+        receipt_dict = self.test_receipt.to_dict()
+        reconstructed = Receipt.from_dict(receipt_dict)
+        
+        # Convert back to dict
+        reconstructed_dict = reconstructed.to_dict()
+        
+        # Compare original and reconstructed dictionaries
+        self.assertEqual(receipt_dict['filename'], reconstructed_dict['filename'])
+        self.assertEqual(receipt_dict['merchant_name'], reconstructed_dict['merchant_name'])
+        self.assertEqual(receipt_dict['total_amount'], reconstructed_dict['total_amount'])
+        self.assertEqual(len(receipt_dict['items']), len(reconstructed_dict['items']))
 
 if __name__ == '__main__':
     unittest.main()

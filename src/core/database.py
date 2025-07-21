@@ -18,14 +18,14 @@ Version: 1.0.0
 
 import sqlite3
 import logging
-from contextlib import contextmanager
-from datetime import datetime
-from decimal import Decimal
+from typing import List, Optional, Dict, Any
+from datetime import datetime, date
 from pathlib import Path
-from typing import List, Optional, Dict, Any, Tuple
+import json
 import threading
+from contextlib import contextmanager
 
-from .models import Receipt, CategoryEnum, CurrencyEnum
+from .models import Receipt, CategoryEnum, CurrencyEnum, ReceiptSearchFilter, ReceiptItem
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -40,43 +40,79 @@ class DatabaseManager:
     with comprehensive CRUD operations.
     """
     
-    def __init__(self, db_path: str = "receipts.db"):
+    def __init__(self, db_path: str = "data/receipts.db"):
         """
         Initialize database manager with connection parameters.
         
         Args:
             db_path: Path to SQLite database file
         """
-        self.db_path = db_path
+        self.db_path = Path(db_path)
+        self.db_path.parent.mkdir(exist_ok=True)
         self.lock = threading.Lock()  # Thread safety
-        self._ensure_database_exists()
+        self._init_database()
     
-    def _ensure_database_exists(self):
-        """Ensure database file exists and is accessible."""
-        db_file = Path(self.db_path)
-        if not db_file.parent.exists():
-            db_file.parent.mkdir(parents=True, exist_ok=True)
+    def _init_database(self):
+        """Initialize the database with required tables."""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                
+                # Create receipts table
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS receipts (
+                        id TEXT PRIMARY KEY,
+                        filename TEXT NOT NULL,
+                        raw_text TEXT NOT NULL,
+                        upload_date TEXT NOT NULL,
+                        merchant_name TEXT,
+                        receipt_date TEXT,
+                        total_amount REAL,
+                        tax_amount REAL,
+                        category TEXT,
+                        notes TEXT,
+                        confidence_score REAL,
+                        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                
+                # Create items table
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS receipt_items (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        receipt_id TEXT NOT NULL,
+                        name TEXT NOT NULL,
+                        price REAL NOT NULL,
+                        quantity INTEGER DEFAULT 1,
+                        category TEXT,
+                        FOREIGN KEY (receipt_id) REFERENCES receipts (id) ON DELETE CASCADE
+                    )
+                """)
+                
+                # Create indexes for better performance
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_receipts_date ON receipts(receipt_date)")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_receipts_merchant ON receipts(merchant_name)")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_receipts_amount ON receipts(total_amount)")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_items_receipt ON receipt_items(receipt_id)")
+                
+                conn.commit()
+                logger.info("Database initialized successfully")
+                
+        except Exception as e:
+            logger.error(f"Error initializing database: {e}")
+            raise
     
     @contextmanager
-    def get_connection(self):
-        """
-        Context manager for database connections with proper resource cleanup.
-        
-        Yields:
-            sqlite3.Connection: Database connection with row factory
-        """
+    def _get_connection(self):
+        """Get database connection with proper error handling"""
         conn = None
         try:
-            conn = sqlite3.connect(
-                self.db_path,
-                timeout=30.0,  # 30 second timeout
-                check_same_thread=False
-            )
-            conn.row_factory = sqlite3.Row  # Enable column access by name
-            conn.execute("PRAGMA foreign_keys = ON")  # Enable foreign key constraints
-            conn.execute("PRAGMA journal_mode = WAL")  # Write-Ahead Logging for better concurrency
+            conn = sqlite3.connect(self.db_path, timeout=30.0)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA foreign_keys = ON")
             yield conn
-        except sqlite3.Error as e:
+        except Exception as e:
             if conn:
                 conn.rollback()
             logger.error(f"Database error: {e}")
@@ -85,453 +121,310 @@ class DatabaseManager:
             if conn:
                 conn.close()
     
-    def initialize_database(self):
-        """
-        Initialize database schema with proper indexing and constraints.
-        
-        Creates the receipts table with optimized indexes for search performance.
-        Ensures ACID compliance and data integrity constraints.
-        """
-        with self.lock:
-            with self.get_connection() as conn:
-                # Create receipts table with comprehensive schema
-                conn.execute("""
-                    CREATE TABLE IF NOT EXISTS receipts (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        vendor TEXT NOT NULL,
-                        transaction_date DATETIME NOT NULL,
-                        amount DECIMAL(10,2) NOT NULL CHECK(amount > 0),
-                        category TEXT NOT NULL,
-                        currency TEXT NOT NULL DEFAULT 'USD',
-                        source_file TEXT NOT NULL,
-                        extracted_text TEXT,
-                        confidence_score REAL DEFAULT 0.0 CHECK(confidence_score >= 0.0 AND confidence_score <= 1.0),
-                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-                    )
-                """)
+    def save_receipt(self, receipt: Receipt) -> str:
+        """Save a receipt to the database"""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
                 
-                # Create optimized indexes for search performance
-                indexes = [
-                    "CREATE INDEX IF NOT EXISTS idx_vendor ON receipts(vendor)",
-                    "CREATE INDEX IF NOT EXISTS idx_date ON receipts(transaction_date)",
-                    "CREATE INDEX IF NOT EXISTS idx_amount ON receipts(amount)",
-                    "CREATE INDEX IF NOT EXISTS idx_category ON receipts(category)",
-                    "CREATE INDEX IF NOT EXISTS idx_currency ON receipts(currency)",
-                    "CREATE INDEX IF NOT EXISTS idx_confidence ON receipts(confidence_score)",
-                    "CREATE INDEX IF NOT EXISTS idx_created_at ON receipts(created_at)",
-                    "CREATE INDEX IF NOT EXISTS idx_vendor_date ON receipts(vendor, transaction_date)",
-                    "CREATE INDEX IF NOT EXISTS idx_category_date ON receipts(category, transaction_date)"
+                # Insert receipt
+                cursor.execute("""
+                    INSERT OR REPLACE INTO receipts (
+                        id, filename, raw_text, upload_date, merchant_name,
+                        receipt_date, total_amount, tax_amount, category,
+                        notes, confidence_score, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    receipt.id,
+                    receipt.filename,
+                    receipt.raw_text,
+                    receipt.upload_date.isoformat(),
+                    receipt.merchant_name,
+                    receipt.receipt_date.isoformat() if receipt.receipt_date else None,
+                    receipt.total_amount,
+                    receipt.tax_amount,
+                    receipt.category,
+                    receipt.notes,
+                    receipt.confidence_score,
+                    datetime.now().isoformat()
+                ))
+                
+                # Delete existing items for this receipt
+                cursor.execute("DELETE FROM receipt_items WHERE receipt_id = ?", (receipt.id,))
+                
+                # Insert items
+                for item in receipt.items:
+                    cursor.execute("""
+                        INSERT INTO receipt_items (receipt_id, name, price, quantity, category)
+                        VALUES (?, ?, ?, ?, ?)
+                    """, (receipt.id, item.name, item.price, item.quantity, item.category))
+                
+                conn.commit()
+                logger.info(f"Saved receipt {receipt.id} to database")
+                return receipt.id
+                
+        except Exception as e:
+            logger.error(f"Error saving receipt: {e}")
+            raise
+    
+    def get_receipt(self, receipt_id: str) -> Optional[Receipt]:
+        """Get a specific receipt by ID"""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                
+                # Get receipt
+                cursor.execute("SELECT * FROM receipts WHERE id = ?", (receipt_id,))
+                row = cursor.fetchone()
+                
+                if not row:
+                    return None
+                
+                # Get items
+                cursor.execute("SELECT * FROM receipt_items WHERE receipt_id = ?", (receipt_id,))
+                item_rows = cursor.fetchall()
+                
+                items = [
+                    ReceiptItem(
+                        name=item['name'],
+                        price=item['price'],
+                        quantity=item['quantity'],
+                        category=item['category']
+                    )
+                    for item in item_rows
                 ]
                 
-                for index_sql in indexes:
-                    conn.execute(index_sql)
+                return Receipt(
+                    id=row['id'],
+                    filename=row['filename'],
+                    raw_text=row['raw_text'],
+                    upload_date=datetime.fromisoformat(row['upload_date']),
+                    merchant_name=row['merchant_name'],
+                    receipt_date=datetime.fromisoformat(row['receipt_date']) if row['receipt_date'] else None,
+                    total_amount=row['total_amount'],
+                    tax_amount=row['tax_amount'],
+                    items=items,
+                    category=row['category'],
+                    notes=row['notes'],
+                    confidence_score=row['confidence_score']
+                )
                 
-                # Create trigger for automatic updated_at timestamp
-                conn.execute("""
-                    CREATE TRIGGER IF NOT EXISTS update_receipts_timestamp 
-                    AFTER UPDATE ON receipts
-                    BEGIN
-                        UPDATE receipts SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
-                    END
-                """)
-                
-                conn.commit()
-                logger.info("Database initialized successfully with optimized schema")
-    
-    def add_receipt(self, receipt: Receipt) -> int:
-        """
-        Add a new receipt to the database with transaction safety.
-        
-        Args:
-            receipt: Receipt object to add
-            
-        Returns:
-            int: ID of the newly created receipt
-            
-        Raises:
-            sqlite3.Error: If database operation fails
-        """
-        with self.lock:
-            with self.get_connection() as conn:
-                cursor = conn.execute("""
-                    INSERT INTO receipts (
-                        vendor, transaction_date, amount, category, currency,
-                        source_file, extracted_text, confidence_score
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    receipt.vendor,
-                    receipt.transaction_date,
-                    str(receipt.amount),
-                    receipt.category.value,
-                    receipt.currency.value,
-                    receipt.source_file,
-                    receipt.extracted_text,
-                    receipt.confidence_score
-                ))
-                
-                receipt_id = cursor.lastrowid
-                conn.commit()
-                
-                logger.info(f"Added receipt {receipt_id} for vendor '{receipt.vendor}'")
-                return receipt_id
-    
-    def get_receipt_by_id(self, receipt_id: int) -> Optional[Receipt]:
-        """
-        Retrieve a specific receipt by ID.
-        
-        Args:
-            receipt_id: Unique identifier of the receipt
-            
-        Returns:
-            Receipt object if found, None otherwise
-        """
-        with self.get_connection() as conn:
-            cursor = conn.execute(
-                "SELECT * FROM receipts WHERE id = ?",
-                (receipt_id,)
-            )
-            row = cursor.fetchone()
-            
-            if row:
-                return self._row_to_receipt(row)
+        except Exception as e:
+            logger.error(f"Error getting receipt {receipt_id}: {e}")
             return None
     
-    def get_all_receipts(self) -> List[Receipt]:
-        """
-        Retrieve all receipts from the database ordered by date (newest first).
-        
-        Returns:
-            List of Receipt objects
-        """
-        with self.get_connection() as conn:
-            cursor = conn.execute("""
-                SELECT * FROM receipts 
-                ORDER BY transaction_date DESC, created_at DESC
-            """)
-            rows = cursor.fetchall()
-            
-            return [self._row_to_receipt(row) for row in rows]
-    
-    def update_receipt(self, receipt: Receipt) -> bool:
-        """
-        Update an existing receipt with transaction safety.
-        
-        Args:
-            receipt: Receipt object with updated data (must have valid ID)
-            
-        Returns:
-            bool: True if update successful, False otherwise
-        """
-        if not receipt.id:
-            logger.error("Cannot update receipt without ID")
-            return False
-        
-        with self.lock:
-            with self.get_connection() as conn:
-                cursor = conn.execute("""
-                    UPDATE receipts SET
-                        vendor = ?, transaction_date = ?, amount = ?, category = ?,
-                        currency = ?, source_file = ?, extracted_text = ?, confidence_score = ?
-                    WHERE id = ?
-                """, (
-                    receipt.vendor,
-                    receipt.transaction_date,
-                    str(receipt.amount),
-                    receipt.category.value,
-                    receipt.currency.value,
-                    receipt.source_file,
-                    receipt.extracted_text,
-                    receipt.confidence_score,
-                    receipt.id
-                ))
-                
-                success = cursor.rowcount > 0
-                if success:
-                    conn.commit()
-                    logger.info(f"Updated receipt {receipt.id}")
-                else:
-                    logger.warning(f"No receipt found with ID {receipt.id}")
-                
-                return success
-    
-    def delete_receipt(self, receipt_id: int) -> bool:
-        """
-        Delete a receipt by ID with transaction safety.
-        
-        Args:
-            receipt_id: Unique identifier of the receipt to delete
-            
-        Returns:
-            bool: True if deletion successful, False otherwise
-        """
-        with self.lock:
-            with self.get_connection() as conn:
-                cursor = conn.execute(
-                    "DELETE FROM receipts WHERE id = ?",
-                    (receipt_id,)
-                )
-                
-                success = cursor.rowcount > 0
-                if success:
-                    conn.commit()
-                    logger.info(f"Deleted receipt {receipt_id}")
-                else:
-                    logger.warning(f"No receipt found with ID {receipt_id}")
-                
-                return success
-    
-    def search_receipts(
-        self,
-        vendor: Optional[str] = None,
-        date_from: Optional[datetime] = None,
-        date_to: Optional[datetime] = None,
-        amount_min: Optional[Decimal] = None,
-        amount_max: Optional[Decimal] = None,
-        category: Optional[CategoryEnum] = None,
-        currency: Optional[CurrencyEnum] = None
-    ) -> List[Receipt]:
-        """
-        Search receipts with multiple criteria using optimized database queries.
-        
-        Args:
-            vendor: Vendor name (partial match supported)
-            date_from: Start date for date range
-            date_to: End date for date range
-            amount_min: Minimum amount
-            amount_max: Maximum amount
-            category: Receipt category
-            currency: Currency type
-            
-        Returns:
-            List of matching Receipt objects
-        """
-        conditions = []
-        params = []
-        
-        # Build dynamic WHERE clause
-        if vendor:
-            conditions.append("vendor LIKE ?")
-            params.append(f"%{vendor}%")
-        
-        if date_from:
-            conditions.append("transaction_date >= ?")
-            params.append(date_from)
-        
-        if date_to:
-            conditions.append("transaction_date <= ?")
-            params.append(date_to)
-        
-        if amount_min is not None:
-            conditions.append("amount >= ?")
-            params.append(str(amount_min))
-        
-        if amount_max is not None:
-            conditions.append("amount <= ?")
-            params.append(str(amount_max))
-        
-        if category:
-            conditions.append("category = ?")
-            params.append(category.value)
-        
-        if currency:
-            conditions.append("currency = ?")
-            params.append(currency.value)
-        
-        # Construct query
-        base_query = "SELECT * FROM receipts"
-        if conditions:
-            where_clause = " WHERE " + " AND ".join(conditions)
-            query = base_query + where_clause + " ORDER BY transaction_date DESC"
-        else:
-            query = base_query + " ORDER BY transaction_date DESC"
-        
-        with self.get_connection() as conn:
-            cursor = conn.execute(query, params)
-            rows = cursor.fetchall()
-            
-            return [self._row_to_receipt(row) for row in rows]
-    
-    def get_vendor_statistics(self) -> List[Tuple[str, int, Decimal]]:
-        """
-        Get vendor statistics (name, count, total amount) ordered by total spending.
-        
-        Returns:
-            List of tuples (vendor_name, transaction_count, total_amount)
-        """
-        with self.get_connection() as conn:
-            cursor = conn.execute("""
-                SELECT vendor, COUNT(*) as count, SUM(amount) as total
-                FROM receipts
-                GROUP BY vendor
-                ORDER BY total DESC
-            """)
-            rows = cursor.fetchall()
-            
-            return [(row['vendor'], row['count'], Decimal(str(row['total']))) for row in rows]
-    
-    def get_monthly_statistics(self) -> List[Tuple[str, int, Decimal]]:
-        """
-        Get monthly spending statistics ordered by month.
-        
-        Returns:
-            List of tuples (month_year, transaction_count, total_amount)
-        """
-        with self.get_connection() as conn:
-            cursor = conn.execute("""
-                SELECT strftime('%Y-%m', transaction_date) as month,
-                       COUNT(*) as count,
-                       SUM(amount) as total
-                FROM receipts
-                GROUP BY strftime('%Y-%m', transaction_date)
-                ORDER BY month DESC
-            """)
-            rows = cursor.fetchall()
-            
-            return [(row['month'], row['count'], Decimal(str(row['total']))) for row in rows]
-    
-    def get_category_statistics(self) -> List[Tuple[str, int, Decimal]]:
-        """
-        Get category statistics ordered by total spending.
-        
-        Returns:
-            List of tuples (category, transaction_count, total_amount)
-        """
-        with self.get_connection() as conn:
-            cursor = conn.execute("""
-                SELECT category, COUNT(*) as count, SUM(amount) as total
-                FROM receipts
-                GROUP BY category
-                ORDER BY total DESC
-            """)
-            rows = cursor.fetchall()
-            
-            return [(row['category'], row['count'], Decimal(str(row['total']))) for row in rows]
-    
-    def bulk_delete_receipts(self, receipt_ids: List[int]) -> int:
-        """
-        Delete multiple receipts in a single transaction.
-        
-        Args:
-            receipt_ids: List of receipt IDs to delete
-            
-        Returns:
-            int: Number of receipts actually deleted
-        """
-        if not receipt_ids:
-            return 0
-        
-        with self.lock:
-            with self.get_connection() as conn:
-                placeholders = ','.join('?' * len(receipt_ids))
-                cursor = conn.execute(
-                    f"DELETE FROM receipts WHERE id IN ({placeholders})",
-                    receipt_ids
-                )
-                
-                deleted_count = cursor.rowcount
-                conn.commit()
-                
-                logger.info(f"Bulk deleted {deleted_count} receipts")
-                return deleted_count
-    
-    def get_database_statistics(self) -> Dict[str, Any]:
-        """
-        Get comprehensive database statistics for monitoring and analytics.
-        
-        Returns:
-            Dictionary with database statistics
-        """
-        with self.get_connection() as conn:
-            stats = {}
-            
-            # Basic counts
-            cursor = conn.execute("SELECT COUNT(*) as total FROM receipts")
-            stats['total_receipts'] = cursor.fetchone()['total']
-            
-            cursor = conn.execute("SELECT SUM(amount) as total FROM receipts")
-            total_amount = cursor.fetchone()['total']
-            stats['total_amount'] = Decimal(str(total_amount)) if total_amount else Decimal('0.00')
-            
-            cursor = conn.execute("SELECT AVG(amount) as avg FROM receipts")
-            avg_amount = cursor.fetchone()['avg']
-            stats['average_amount'] = Decimal(str(avg_amount)) if avg_amount else Decimal('0.00')
-            
-            # Date range
-            cursor = conn.execute("""
-                SELECT MIN(transaction_date) as earliest, MAX(transaction_date) as latest
-                FROM receipts
-            """)
-            date_range = cursor.fetchone()
-            stats['date_range'] = {
-                'earliest': date_range['earliest'],
-                'latest': date_range['latest']
-            }
-            
-            # Unique counts
-            cursor = conn.execute("SELECT COUNT(DISTINCT vendor) as count FROM receipts")
-            stats['unique_vendors'] = cursor.fetchone()['count']
-            
-            cursor = conn.execute("SELECT COUNT(DISTINCT category) as count FROM receipts")
-            stats['unique_categories'] = cursor.fetchone()['count']
-            
-            cursor = conn.execute("SELECT COUNT(DISTINCT currency) as count FROM receipts")
-            stats['unique_currencies'] = cursor.fetchone()['count']
-            
-            return stats
-    
-    def _row_to_receipt(self, row: sqlite3.Row) -> Receipt:
-        """
-        Convert database row to Receipt object.
-        
-        Args:
-            row: SQLite row object
-            
-        Returns:
-            Receipt object
-        """
-        return Receipt(
-            id=row['id'],
-            vendor=row['vendor'],
-            transaction_date=datetime.fromisoformat(row['transaction_date']),
-            amount=Decimal(str(row['amount'])),
-            category=CategoryEnum(row['category']),
-            currency=CurrencyEnum(row['currency']),
-            source_file=row['source_file'],
-            extracted_text=row['extracted_text'],
-            confidence_score=row['confidence_score']
-        )
-    
-    def backup_database(self, backup_path: str) -> bool:
-        """
-        Create a backup of the database.
-        
-        Args:
-            backup_path: Path for the backup file
-            
-        Returns:
-            bool: True if backup successful, False otherwise
-        """
+    def get_all_receipts(self, limit: Optional[int] = None, offset: int = 0) -> List[Receipt]:
+        """Get all receipts with optional pagination"""
         try:
-            with self.get_connection() as source:
-                backup_conn = sqlite3.connect(backup_path)
-                source.backup(backup_conn)
-                backup_conn.close()
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
                 
-            logger.info(f"Database backed up to {backup_path}")
-            return True
+                query = "SELECT * FROM receipts ORDER BY receipt_date DESC, upload_date DESC"
+                params = []
+                
+                if limit:
+                    query += " LIMIT ? OFFSET ?"
+                    params.extend([limit, offset])
+                
+                cursor.execute(query, params)
+                rows = cursor.fetchall()
+                
+                receipts = []
+                for row in rows:
+                    # Get items for this receipt
+                    cursor.execute("SELECT * FROM receipt_items WHERE receipt_id = ?", (row['id'],))
+                    item_rows = cursor.fetchall()
+                    
+                    items = [
+                        ReceiptItem(
+                            name=item['name'],
+                            price=item['price'],
+                            quantity=item['quantity'],
+                            category=item['category']
+                        )
+                        for item in item_rows
+                    ]
+                    
+                    receipt = Receipt(
+                        id=row['id'],
+                        filename=row['filename'],
+                        raw_text=row['raw_text'],
+                        upload_date=datetime.fromisoformat(row['upload_date']),
+                        merchant_name=row['merchant_name'],
+                        receipt_date=datetime.fromisoformat(row['receipt_date']) if row['receipt_date'] else None,
+                        total_amount=row['total_amount'],
+                        tax_amount=row['tax_amount'],
+                        items=items,
+                        category=row['category'],
+                        notes=row['notes'],
+                        confidence_score=row['confidence_score']
+                    )
+                    receipts.append(receipt)
+                
+                return receipts
+                
         except Exception as e:
-            logger.error(f"Backup failed: {e}")
-            return False
+            logger.error(f"Error getting all receipts: {e}")
+            return []
     
-    def optimize_database(self):
-        """
-        Optimize database performance by running VACUUM and ANALYZE.
-        """
-        with self.lock:
-            with self.get_connection() as conn:
-                conn.execute("VACUUM")
-                conn.execute("ANALYZE")
+    def delete_receipt(self, receipt_id: str) -> bool:
+        """Delete a receipt and its items"""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM receipts WHERE id = ?", (receipt_id,))
+                deleted = cursor.rowcount > 0
                 conn.commit()
                 
-            logger.info("Database optimization completed")
+                if deleted:
+                    logger.info(f"Deleted receipt {receipt_id}")
+                
+                return deleted
+                
+        except Exception as e:
+            logger.error(f"Error deleting receipt {receipt_id}: {e}")
+            return False
+    
+    def search_receipts(self, query: str, filters: Optional[Dict[str, Any]] = None) -> List[Receipt]:
+        """Search receipts by text query and optional filters"""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                
+                sql_query = """
+                    SELECT DISTINCT r.* FROM receipts r
+                    LEFT JOIN receipt_items i ON r.id = i.receipt_id
+                    WHERE (
+                        r.raw_text LIKE ? OR
+                        r.merchant_name LIKE ? OR
+                        r.notes LIKE ? OR
+                        i.name LIKE ?
+                    )
+                """
+                
+                params = [f"%{query}%"] * 4
+                
+                # Add filters
+                if filters:
+                    if filters.get('start_date'):
+                        sql_query += " AND r.receipt_date >= ?"
+                        params.append(filters['start_date'])
+                    
+                    if filters.get('end_date'):
+                        sql_query += " AND r.receipt_date <= ?"
+                        params.append(filters['end_date'])
+                    
+                    if filters.get('min_amount'):
+                        sql_query += " AND r.total_amount >= ?"
+                        params.append(filters['min_amount'])
+                    
+                    if filters.get('max_amount'):
+                        sql_query += " AND r.total_amount <= ?"
+                        params.append(filters['max_amount'])
+                    
+                    if filters.get('merchant'):
+                        sql_query += " AND r.merchant_name LIKE ?"
+                        params.append(f"%{filters['merchant']}%")
+                
+                sql_query += " ORDER BY r.receipt_date DESC, r.upload_date DESC"
+                
+                cursor.execute(sql_query, params)
+                rows = cursor.fetchall()
+                
+                receipts = []
+                for row in rows:
+                    # Get items for this receipt
+                    cursor.execute("SELECT * FROM receipt_items WHERE receipt_id = ?", (row['id'],))
+                    item_rows = cursor.fetchall()
+                    
+                    items = [
+                        ReceiptItem(
+                            name=item['name'],
+                            price=item['price'],
+                            quantity=item['quantity'],
+                            category=item['category']
+                        )
+                        for item in item_rows
+                    ]
+                    
+                    receipt = Receipt(
+                        id=row['id'],
+                        filename=row['filename'],
+                        raw_text=row['raw_text'],
+                        upload_date=datetime.fromisoformat(row['upload_date']),
+                        merchant_name=row['merchant_name'],
+                        receipt_date=datetime.fromisoformat(row['receipt_date']) if row['receipt_date'] else None,
+                        total_amount=row['total_amount'],
+                        tax_amount=row['tax_amount'],
+                        items=items,
+                        category=row['category'],
+                        notes=row['notes'],
+                        confidence_score=row['confidence_score']
+                    )
+                    receipts.append(receipt)
+                
+                return receipts
+                
+        except Exception as e:
+            logger.error(f"Error searching receipts: {e}")
+            return []
+    
+    def get_analytics_data(self) -> Dict[str, Any]:
+        """Get analytics data from the database"""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                
+                # Basic stats
+                cursor.execute("SELECT COUNT(*), SUM(total_amount), AVG(total_amount) FROM receipts")
+                total_receipts, total_amount, avg_amount = cursor.fetchone()
+                
+                # Unique merchants
+                cursor.execute("SELECT COUNT(DISTINCT merchant_name) FROM receipts WHERE merchant_name IS NOT NULL")
+                unique_merchants = cursor.fetchone()[0]
+                
+                # Top merchants
+                cursor.execute("""
+                    SELECT merchant_name, SUM(total_amount) as total
+                    FROM receipts 
+                    WHERE merchant_name IS NOT NULL AND total_amount IS NOT NULL
+                    GROUP BY merchant_name 
+                    ORDER BY total DESC 
+                    LIMIT 10
+                """)
+                top_merchants = dict(cursor.fetchall())
+                
+                # Monthly breakdown
+                cursor.execute("""
+                    SELECT 
+                        strftime('%Y-%m', receipt_date) as month,
+                        COUNT(*) as count,
+                        SUM(total_amount) as total,
+                        AVG(total_amount) as average
+                    FROM receipts 
+                    WHERE receipt_date IS NOT NULL AND total_amount IS NOT NULL
+                    GROUP BY month 
+                    ORDER BY month DESC
+                """)
+                monthly_data = cursor.fetchall()
+                
+                return {
+                    'total_receipts': total_receipts or 0,
+                    'total_amount': total_amount or 0.0,
+                    'average_amount': avg_amount or 0.0,
+                    'unique_merchants': unique_merchants or 0,
+                    'top_merchants': top_merchants,
+                    'monthly_breakdown': [
+                        {
+                            'month': row[0],
+                            'count': row[1],
+                            'total': row[2],
+                            'average': row[3]
+                        }
+                        for row in monthly_data
+                    ]
+                }
+                
+        except Exception as e:
+            logger.error(f"Error getting analytics data: {e}")
+            return {}
