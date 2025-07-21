@@ -35,8 +35,6 @@ FROM python:3.11-slim as runtime
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PATH="/opt/venv/bin:$PATH" \
-    STREAMLIT_SERVER_PORT=8501 \
-    STREAMLIT_SERVER_ADDRESS=0.0.0.0 \
     STREAMLIT_SERVER_HEADLESS=true \
     STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
 
@@ -75,9 +73,13 @@ WORKDIR /app
 RUN mkdir -p /app/data /app/uploads /app/logs \
     && chown -R appuser:appuser /app
 
-# Copy application code (only copy what exists)
+# Copy application code and startup script
 COPY --chown=appuser:appuser src/ ./src/
 COPY --chown=appuser:appuser requirements.txt ./
+COPY --chown=appuser:appuser start.sh ./
+
+# Make startup script executable
+RUN chmod +x start.sh
 
 # Create .streamlit directory and config
 RUN mkdir -p /app/.streamlit && \
@@ -102,7 +104,7 @@ EXPOSE 8501
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8501/_stcore/health || exit 1
+    CMD curl -f http://localhost:${PORT:-8501}/_stcore/health || exit 1
 
-# Default command
-CMD ["python", "src/app.py"]
+# Use the startup script as default command
+CMD ["./start.sh"]
