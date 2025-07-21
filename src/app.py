@@ -25,15 +25,25 @@ from core.parsing import ReceiptParser
 from core.models import Receipt
 from ui.components import create_sidebar, display_receipt_card, create_metrics_row
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('logs/app.log'),
-        logging.StreamHandler()
-    ]
-)
+# Configure logging with directory creation
+def setup_logging():
+    """Setup logging with proper directory creation"""
+    # Create logs directory if it doesn't exist
+    log_dir = Path("logs")
+    log_dir.mkdir(exist_ok=True)
+    
+    # Configure logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler(log_dir / 'app.log'),
+            logging.StreamHandler()
+        ]
+    )
+
+# Setup logging
+setup_logging()
 logger = logging.getLogger(__name__)
 
 # Page configuration
