@@ -82,7 +82,6 @@ COPY --chown=appuser:appuser requirements.txt ./
 # Create .streamlit directory and config
 RUN mkdir -p /app/.streamlit && \
     echo '[server]' > /app/.streamlit/config.toml && \
-    echo 'port = 8501' >> /app/.streamlit/config.toml && \
     echo 'address = "0.0.0.0"' >> /app/.streamlit/config.toml && \
     echo 'headless = true' >> /app/.streamlit/config.toml && \
     echo 'enableCORS = false' >> /app/.streamlit/config.toml && \
