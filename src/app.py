@@ -154,6 +154,29 @@ def main():
         st.error(f"Error loading statistics: {str(e)}")
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8501))
-    sys.argv = ["streamlit", "run", "src/app.py", "--server.port", str(port), "--server.address", "0.0.0.0"]
+    # Get port from environment variable, with better error handling
+    try:
+        port_str = os.environ.get("PORT", "8501")
+        port = int(port_str)
+    except (ValueError, TypeError):
+        print(f"Invalid PORT value: {os.environ.get('PORT')}. Using default port 8501.")
+        port = 8501
+    
+    # Set up Streamlit arguments
+    sys.argv = [
+        "streamlit", 
+        "run", 
+        "src/app.py", 
+        "--server.port", 
+        str(port), 
+        "--server.address", 
+        "0.0.0.0",
+        "--server.headless", 
+        "true"
+    ]
+    
+    # Print debug info
+    print(f"Starting Streamlit on port {port}")
+    print(f"Command: {' '.join(sys.argv)}")
+    
     sys.exit(stcli.main())
