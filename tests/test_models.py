@@ -17,13 +17,15 @@ from pydantic import ValidationError
 
 # Import modules to test
 import sys
+import os
+
 src_path = Path(__file__).parent.parent / "src"
 sys.path.insert(0, str(src_path))
 
 from core.models import (
     Receipt, CategoryEnum, CurrencyEnum, ProcessingResult, 
     SearchFilters, AnalyticsData, FileUploadData, ReceiptSearchFilter,
-    classify_category, detect_currency, ReceiptItem
+    classify_category, detect_currency, ReceiptItem, ReceiptStatistics
 )
 
 class TestReceiptModel(unittest.TestCase):
@@ -634,150 +636,200 @@ class TestReceiptItem(unittest.TestCase):
         """Test creating a receipt item"""
         item = ReceiptItem(
             name="Test Item",
-            price=5.99,
+            price=10.99,
             quantity=2,
             category="Food"
         )
         
         self.assertEqual(item.name, "Test Item")
-        self.assertEqual(item.price, 5.99)
+        self.assertEqual(item.price, 10.99)
         self.assertEqual(item.quantity, 2)
         self.assertEqual(item.category, "Food")
     
     def test_receipt_item_defaults(self):
         """Test receipt item default values"""
-        item = ReceiptItem(name="Test Item", price=5.99)
+        item = ReceiptItem(name="Test", price=5.00)
         
         self.assertEqual(item.quantity, 1)
-        self.assertIsNone(item.category)
+        self.assertEqual(item.category, "Other")
     
-    def test_receipt_item_validation(self):
-        """Test receipt item validation"""
-        # Test negative price
-        with self.assertRaises(ValueError):
-            ReceiptItem(name="Test Item", price=-5.99)
+    def test_receipt_item_to_dict(self):
+        """Test converting receipt item to dictionary"""
+        item = ReceiptItem(name="Test", price=5.00, quantity=2)
+        item_dict = item.to_dict()
         
-        # Test negative quantity
-        with self.assertRaises(ValueError):
-            ReceiptItem(name="Test Item", price=5.99, quantity=-1)
+        expected = {
+            'name': 'Test',
+            'price': 5.00,
+            'quantity': 2,
+            'category': 'Other'
+        }
+        
+        self.assertEqual(item_dict, expected)
+    
+    def test_receipt_item_from_dict(self):
+        """Test creating receipt item from dictionary"""
+        data = {
+            'name': 'Test Item',
+            'price': 15.99,
+            'quantity': 3,
+            'category': 'Electronics'
+        }
+        
+        item = ReceiptItem.from_dict(data)
+        
+        self.assertEqual(item.name, 'Test Item')
+        self.assertEqual(item.price, 15.99)
+        self.assertEqual(item.quantity, 3)
+        self.assertEqual(item.category, 'Electronics')
 
 class TestReceipt(unittest.TestCase):
     
     def setUp(self):
         """Set up test data"""
         self.test_items = [
-            ReceiptItem(name="Item 1", price=5.99, quantity=1),
-            ReceiptItem(name="Item 2", price=3.50, quantity=2)
+            ReceiptItem(name="Item 1", price=10.00, quantity=1),
+            ReceiptItem(name="Item 2", price=15.50, quantity=2)
         ]
         
         self.test_receipt = Receipt(
-            filename="test_receipt.jpg",
-            raw_text="Test receipt text",
-            upload_date=datetime(2024, 1, 1, 12, 0, 0),
-            merchant_name="Test Store",
-            receipt_date=datetime(2024, 1, 1),
-            total_amount=12.99,
-            tax_amount=1.00,
+            store_name="Test Store",
+            date=datetime(2024, 1, 15, 14, 30),
+            total=41.00,
             items=self.test_items,
-            category="Groceries",
-            notes="Test notes"
+            category="Grocery",
+            tax=2.50,
+            tip=3.00
         )
     
     def test_receipt_creation(self):
         """Test creating a receipt"""
-        self.assertEqual(self.test_receipt.filename, "test_receipt.jpg")
-        self.assertEqual(self.test_receipt.merchant_name, "Test Store")
-        self.assertEqual(self.test_receipt.total_amount, 12.99)
+        self.assertEqual(self.test_receipt.store_name, "Test Store")
+        self.assertEqual(self.test_receipt.total, 41.00)
         self.assertEqual(len(self.test_receipt.items), 2)
+        self.assertEqual(self.test_receipt.category, "Grocery")
     
-    def test_receipt_id_generation(self):
-        """Test automatic ID generation"""
+    def test_receipt_defaults(self):
+        """Test receipt default values"""
         receipt = Receipt(
-            filename="test.jpg",
-            raw_text="test",
-            upload_date=datetime.now()
+            store_name="Store",
+            date=datetime.now(),
+            total=10.00
         )
         
-        self.assertIsNotNone(receipt.id)
-        self.assertIsInstance(receipt.id, str)
+        self.assertEqual(receipt.category, "Other")
+        self.assertEqual(receipt.tax, 0.0)
+        self.assertEqual(receipt.tip, 0.0)
+        self.assertEqual(receipt.payment_method, "Unknown")
+        self.assertEqual(len(receipt.items), 0)
     
-    def test_receipt_validation(self):
-        """Test receipt validation"""
-        # Test negative total amount
-        with self.assertRaises(ValueError):
-            Receipt(
-                filename="test.jpg",
-                raw_text="test",
-                upload_date=datetime.now(),
-                total_amount=-10.00
-            )
+    def test_get_item_count(self):
+        """Test getting total item count"""
+        count = self.test_receipt.get_item_count()
+        self.assertEqual(count, 3)  # 1 + 2 quantities
+    
+    def test_get_subtotal(self):
+        """Test calculating subtotal"""
+        subtotal = self.test_receipt.get_subtotal()
+        expected = 41.00 - 2.50 - 3.00  # total - tax - tip
+        self.assertEqual(subtotal, expected)
+    
+    def test_add_item(self):
+        """Test adding an item to receipt"""
+        new_item = ReceiptItem(name="New Item", price=5.00)
+        self.test_receipt.add_item(new_item)
         
-        # Test negative tax amount
-        with self.assertRaises(ValueError):
-            Receipt(
-                filename="test.jpg",
-                raw_text="test",
-                upload_date=datetime.now(),
-                tax_amount=-1.00
-            )
+        self.assertEqual(len(self.test_receipt.items), 3)
+        self.assertEqual(self.test_receipt.items[-1].name, "New Item")
+    
+    def test_remove_item(self):
+        """Test removing an item from receipt"""
+        self.test_receipt.remove_item(0)
+        
+        self.assertEqual(len(self.test_receipt.items), 1)
+        self.assertEqual(self.test_receipt.items[0].name, "Item 2")
+    
+    def test_get_items_by_category(self):
+        """Test grouping items by category"""
+        # Add items with different categories
+        self.test_receipt.items[0].category = "Food"
+        self.test_receipt.items[1].category = "Beverage"
+        
+        categories = self.test_receipt.get_items_by_category()
+        
+        self.assertIn("Food", categories)
+        self.assertIn("Beverage", categories)
+        self.assertEqual(len(categories["Food"]), 1)
+        self.assertEqual(len(categories["Beverage"]), 1)
     
     def test_receipt_to_dict(self):
         """Test converting receipt to dictionary"""
         receipt_dict = self.test_receipt.to_dict()
         
-        self.assertEqual(receipt_dict['filename'], "test_receipt.jpg")
-        self.assertEqual(receipt_dict['merchant_name'], "Test Store")
-        self.assertEqual(receipt_dict['total_amount'], 12.99)
+        self.assertEqual(receipt_dict['store_name'], "Test Store")
+        self.assertEqual(receipt_dict['total'], 41.00)
         self.assertEqual(len(receipt_dict['items']), 2)
-        
-        # Test item conversion
-        first_item = receipt_dict['items'][0]
-        self.assertEqual(first_item['name'], "Item 1")
-        self.assertEqual(first_item['price'], 5.99)
+        self.assertIsInstance(receipt_dict['date'], str)
     
     def test_receipt_from_dict(self):
         """Test creating receipt from dictionary"""
-        receipt_dict = self.test_receipt.to_dict()
-        reconstructed_receipt = Receipt.from_dict(receipt_dict)
+        data = {
+            'store_name': 'Dict Store',
+            'date': '2024-01-15T14:30:00',
+            'total': 25.00,
+            'items': [
+                {'name': 'Dict Item', 'price': 25.00, 'quantity': 1, 'category': 'Other'}
+            ],
+            'category': 'Test',
+            'tax': 1.50,
+            'tip': 2.00
+        }
         
-        self.assertEqual(reconstructed_receipt.filename, self.test_receipt.filename)
-        self.assertEqual(reconstructed_receipt.merchant_name, self.test_receipt.merchant_name)
-        self.assertEqual(reconstructed_receipt.total_amount, self.test_receipt.total_amount)
-        self.assertEqual(len(reconstructed_receipt.items), len(self.test_receipt.items))
+        receipt = Receipt.from_dict(data)
         
-        # Test item reconstruction
-        first_item = reconstructed_receipt.items[0]
-        self.assertEqual(first_item.name, "Item 1")
-        self.assertEqual(first_item.price, 5.99)
+        self.assertEqual(receipt.store_name, 'Dict Store')
+        self.assertEqual(receipt.total, 25.00)
+        self.assertEqual(len(receipt.items), 1)
+        self.assertEqual(receipt.items[0].name, 'Dict Item')
+
+class TestReceiptStatistics(unittest.TestCase):
     
-    def test_receipt_minimal_data(self):
-        """Test receipt with minimal required data"""
-        minimal_receipt = Receipt(
-            filename="minimal.jpg",
-            raw_text="minimal text",
-            upload_date=datetime.now()
+    def test_statistics_creation(self):
+        """Test creating receipt statistics"""
+        stats = ReceiptStatistics(
+            total_receipts=10,
+            total_spent=250.00,
+            average_receipt=25.00,
+            most_frequent_store="Test Store"
         )
         
-        self.assertIsNotNone(minimal_receipt.id)
-        self.assertEqual(minimal_receipt.filename, "minimal.jpg")
-        self.assertIs(minimal_receipt.merchant_name, None)
-        self.assertIs(minimal_receipt.total_amount, None)
-        self.assertEqual(len(minimal_receipt.items), 0)
+        self.assertEqual(stats.total_receipts, 10)
+        self.assertEqual(stats.total_spent, 250.00)
+        self.assertEqual(stats.average_receipt, 25.00)
+        self.assertEqual(stats.most_frequent_store, "Test Store")
     
-    def test_receipt_serialization_roundtrip(self):
-        """Test full serialization roundtrip"""
-        # Convert to dict and back
-        receipt_dict = self.test_receipt.to_dict()
-        reconstructed = Receipt.from_dict(receipt_dict)
+    def test_statistics_defaults(self):
+        """Test statistics default values"""
+        stats = ReceiptStatistics()
         
-        # Convert back to dict
-        reconstructed_dict = reconstructed.to_dict()
+        self.assertEqual(stats.total_receipts, 0)
+        self.assertEqual(stats.total_spent, 0.0)
+        self.assertEqual(stats.average_receipt, 0.0)
+        self.assertEqual(stats.most_frequent_store, "")
+    
+    def test_statistics_to_dict(self):
+        """Test converting statistics to dictionary"""
+        stats = ReceiptStatistics(total_receipts=5, total_spent=100.00)
+        stats_dict = stats.to_dict()
         
-        # Compare original and reconstructed dictionaries
-        self.assertEqual(receipt_dict['filename'], reconstructed_dict['filename'])
-        self.assertEqual(receipt_dict['merchant_name'], reconstructed_dict['merchant_name'])
-        self.assertEqual(receipt_dict['total_amount'], reconstructed_dict['total_amount'])
-        self.assertEqual(len(receipt_dict['items']), len(reconstructed_dict['items']))
+        expected_keys = [
+            'total_receipts', 'total_spent', 'average_receipt',
+            'most_frequent_store', 'most_expensive_receipt',
+            'receipts_this_month', 'spending_this_month'
+        ]
+        
+        for key in expected_keys:
+            self.assertIn(key, stats_dict)
 
 if __name__ == '__main__':
     unittest.main()

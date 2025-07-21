@@ -1,38 +1,16 @@
-# Makefile for Receipt Processor Docker operations
+# Docker commands for receipt processor
+.PHONY: build run dev logs clean stop restart shell test
 
 # Variables
 IMAGE_NAME = receipt-processor
-CONTAINER_NAME = receipt-processor
+CONTAINER_NAME = receipt-processor-app
 PORT = 8501
-VERSION = latest
-
-# Default target
-.PHONY: help
-help:
-	@echo "Available commands:"
-	@echo "  build       - Build the Docker image"
-	@echo "  run         - Run the container"
-	@echo "  stop        - Stop the container"
-	@echo "  clean       - Remove container and image"
-	@echo "  logs        - Show container logs"
-	@echo "  shell       - Open shell in running container"
-	@echo "  test        - Run tests in container"
-	@echo "  push        - Push image to registry"
-	@echo "  dev         - Run in development mode with volume mounts"
 
 # Build the Docker image
-.PHONY: build
 build:
-	docker build -t $(IMAGE_NAME):$(VERSION) .
-	docker tag $(IMAGE_NAME):$(VERSION) $(IMAGE_NAME):latest
+	docker build -t $(IMAGE_NAME) .
 
-# Build with no cache
-.PHONY: build-no-cache
-build-no-cache:
-	docker build --no-cache -t $(IMAGE_NAME):$(VERSION) .
-
-# Run the container
-.PHONY: run
+# Run the container in production mode
 run:
 	docker run -d \
 		--name $(CONTAINER_NAME) \
@@ -40,73 +18,86 @@ run:
 		-v $(PWD)/data:/app/data \
 		-v $(PWD)/uploads:/app/uploads \
 		-v $(PWD)/logs:/app/logs \
-		$(IMAGE_NAME):$(VERSION)
+		$(IMAGE_NAME)
 
 # Run in development mode with source code mounted
-.PHONY: dev
 dev:
-	docker run -it --rm \
+	docker run -it \
 		--name $(CONTAINER_NAME)-dev \
 		-p $(PORT):8501 \
 		-v $(PWD)/src:/app/src \
 		-v $(PWD)/data:/app/data \
 		-v $(PWD)/uploads:/app/uploads \
 		-v $(PWD)/logs:/app/logs \
-		$(IMAGE_NAME):$(VERSION)
+		$(IMAGE_NAME)
 
-# Stop the container
-.PHONY: stop
-stop:
-	docker stop $(CONTAINER_NAME) || true
-	docker rm $(CONTAINER_NAME) || true
-
-# Show logs
-.PHONY: logs
+# View container logs
 logs:
 	docker logs -f $(CONTAINER_NAME)
 
-# Open shell in running container
-.PHONY: shell
+# Stop the container
+stop:
+	docker stop $(CONTAINER_NAME) || true
+	docker stop $(CONTAINER_NAME)-dev || true
+
+# Remove containers and images
+clean: stop
+	docker rm $(CONTAINER_NAME) || true
+	docker rm $(CONTAINER_NAME)-dev || true
+	docker rmi $(IMAGE_NAME) || true
+
+# Restart the container
+restart: stop run
+
+# Get a shell inside the running container
 shell:
 	docker exec -it $(CONTAINER_NAME) /bin/bash
 
-# Run tests
-.PHONY: test
-test:
-	docker run --rm \
-		-v $(PWD)/tests:/app/tests \
-		$(IMAGE_NAME):$(VERSION) \
-		python -m pytest tests/ -v
-
-# Clean up
-.PHONY: clean
-clean:
-	docker stop $(CONTAINER_NAME) || true
-	docker rm $(CONTAINER_NAME) || true
-	docker rmi $(IMAGE_NAME):$(VERSION) || true
-	docker rmi $(IMAGE_NAME):latest || true
-
-# Push to registry (customize registry URL)
-.PHONY: push
-push:
-	docker push $(IMAGE_NAME):$(VERSION)
-	docker push $(IMAGE_NAME):latest
-
-# Docker compose operations
-.PHONY: up
+# Run with docker-compose
 up:
 	docker-compose up -d
 
-.PHONY: down
+# Stop docker-compose
 down:
 	docker-compose down
 
-.PHONY: restart
-restart:
-	docker-compose restart
+# View docker-compose logs
+compose-logs:
+	docker-compose logs -f
 
-# System cleanup
-.PHONY: system-clean
-system-clean:
+# Build and run with docker-compose
+compose-build:
+	docker-compose up --build -d
+
+# Show container status
+status:
+	docker ps -a | grep $(IMAGE_NAME)
+
+# Show image size
+size:
+	docker images | grep $(IMAGE_NAME)
+
+# Prune unused Docker resources
+prune:
 	docker system prune -f
-	docker volume prune -f
+	docker image prune -f
+
+# Help
+help:
+	@echo "Available commands:"
+	@echo "  build         - Build the Docker image"
+	@echo "  run           - Run container in production mode"
+	@echo "  dev           - Run container in development mode"
+	@echo "  logs          - View container logs"
+	@echo "  stop          - Stop the container"
+	@echo "  clean         - Remove containers and images"
+	@echo "  restart       - Restart the container"
+	@echo "  shell         - Get shell access to container"
+	@echo "  up            - Start with docker-compose"
+	@echo "  down          - Stop docker-compose"
+	@echo "  compose-logs  - View docker-compose logs"
+	@echo "  compose-build - Build and start with docker-compose"
+	@echo "  status        - Show container status"
+	@echo "  size          - Show image size"
+	@echo "  prune         - Clean up unused Docker resources"
+	@echo "  help          - Show this help message"

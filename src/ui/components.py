@@ -163,101 +163,240 @@ def apply_custom_css():
     """, unsafe_allow_html=True)
 
 def create_sidebar():
-    """Create consistent sidebar navigation."""
+    """Create the application sidebar"""
     with st.sidebar:
-        st.markdown("## 🧾 Receipt Processor")
+        st.header("🧾 Receipt Processor")
         st.markdown("---")
         
         # Navigation
-        st.markdown("### 📍 Navigation")
-        
-        if st.button("🏠 Home", use_container_width=True):
-            st.experimental_rerun()
-        
-        if st.button("🔍 Data Explorer", use_container_width=True):
-            st.experimental_rerun()
-        
-        if st.button("📊 Analytics", use_container_width=True):
-            st.experimental_rerun()
+        st.subheader("Navigation")
+        st.page_link("src/app.py", label="🏠 Home", icon="🏠")
+        st.page_link("src/pages/1_Data_Explorer.py", label="📊 Data Explorer", icon="📊")
+        st.page_link("src/pages/2_Analytics_Dashboard.py", label="📈 Analytics", icon="📈")
         
         st.markdown("---")
         
         # Quick stats
+        st.subheader("Quick Stats")
         try:
-            db_manager = DatabaseManager()
-            receipts = db_manager.get_all_receipts()
-            
-            st.markdown("### 📈 Quick Stats")
-            st.metric("Total Receipts", len(receipts))
-            
-            if receipts:
-                total_amount = sum(r.amount for r in receipts)
-                st.metric("Total Amount", f"${total_amount:,.2f}")
-                
-                # Recent activity
-                recent_receipts = sorted(receipts, key=lambda x: x.transaction_date, reverse=True)[:3]
-                
-                st.markdown("### 🕒 Recent Activity")
-                for receipt in recent_receipts:
-                    st.markdown(f"""
-                    **{receipt.vendor}**  
-                    ${receipt.amount} • {receipt.transaction_date.strftime('%m/%d/%Y')}
-                    """)
-            
+            if 'db' in st.session_state:
+                stats = st.session_state.db.get_statistics()
+                st.metric("Total Receipts", stats.total_receipts)
+                st.metric("Total Spent", f"${stats.total_spent:.2f}")
+                st.metric("This Month", f"${stats.spending_this_month:.2f}")
         except Exception as e:
-            st.error("Unable to load stats")
+            st.error(f"Error loading stats: {str(e)}")
         
         st.markdown("---")
         
-        # Help section
-        with st.expander("❓ Help & Tips"):
-            st.markdown("""
-            **Supported Formats:**
-            - PDF files
-            - Images (JPG, PNG, TIFF, BMP)
-            - Text files
-            
-            **Tips for Better OCR:**
-            - Use clear, well-lit images
-            - Avoid blurry or skewed photos
-            - Ensure text is readable
-            - Keep file sizes under 10MB
-            
-            **Search Features:**
-            - Use fuzzy search for similar names
-            - Filter by date ranges
-            - Set amount thresholds
-            - Filter by category or currency
-            """)
-        
-        # Footer
-        st.markdown("---")
-        st.markdown("""
-        <div style='text-align: center; color: #666; font-size: 0.8em;'>
-            <p>Receipt Processing App v1.0</p>
-            <p>Built with Streamlit</p>
-        </div>
-        """, unsafe_allow_html=True)
+        # Settings
+        st.subheader("Settings")
+        st.selectbox("Theme", ["Light", "Dark"], disabled=True, help="Coming soon!")
+        st.selectbox("Currency", ["USD", "EUR", "GBP"], disabled=True, help="Coming soon!")
 
-def show_upload_interface():
-    """Display a compact upload interface for the main page."""
-    st.markdown("#### Quick Upload")
-    
-    uploaded_file = st.file_uploader(
-        "Drop a receipt file here",
-        type=['pdf', 'jpg', 'jpeg', 'png', 'tiff', 'bmp', 'txt'],
-        help="Supported: PDF, JPG, PNG, TIFF, BMP, TXT (max 10MB)"
-    )
-    
-    if uploaded_file:
+def display_receipt_card(receipt):
+    """Display a receipt card"""
+    with st.container():
         col1, col2 = st.columns([3, 1])
         
         with col1:
-            st.info(f"📄 **{uploaded_file.name}** ({uploaded_file.size:,} bytes)")
+            st.write(f"**{receipt.store_name}**")
+            st.write(f"{receipt.date.strftime('%Y-%m-%d')}")
+            if receipt.items:
+                st.write(f"{len(receipt.items)} items")
         
         with col2:
-            if st.button("🚀 Process", type="primary"):
-                process_quick_upload(uploaded_file)
+            st.write(f"**${receipt.total:.2f}**")
+            st.write(f"_{receipt.category}_")
+        
+        st.markdown("---")
+
+def create_metrics_row(stats: Dict[str, Any]):
+    """Create a row of metrics"""
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.metric(
+            "Total Receipts",
+            stats.get('total_receipts', 0)
+        )
+    
+    with col2:
+        st.metric(
+            "Total Spent",
+            f"${stats.get('total_spent', 0):.2f}"
+        )
+    
+    with col3:
+        st.metric(
+            "Average Receipt",
+            f"${stats.get('average_receipt', 0):.2f}"
+        )
+    
+    with col4:
+        st.metric(
+            "This Month",
+            f"${stats.get('spending_this_month', 0):.2f}"
+        )
+
+def create_spending_chart(data: List[Dict[str, Any]], chart_type: str = "bar"):
+    """Create a spending chart"""
+    if not data:
+        st.info("No data available for chart")
+        return
+    
+    if chart_type == "bar":
+        fig = px.bar(
+            data,
+            x='category',
+            y='total',
+            title='Spending by Category'
+        )
+    elif chart_type == "pie":
+        fig = px.pie(
+            data,
+            values='total',
+            names='category',
+            title='Spending Distribution'
+        )
+    else:
+        fig = px.line(
+            data,
+            x='date',
+            y='total',
+            title='Spending Over Time'
+        )
+    
+    st.plotly_chart(fig, use_container_width=True)
+
+def display_error_message(error: str, details: str = None):
+    """Display a formatted error message"""
+    st.error(f"❌ **Error:** {error}")
+    if details:
+        with st.expander("Error Details"):
+            st.code(details)
+
+def display_success_message(message: str):
+    """Display a success message"""
+    st.success(f"✅ {message}")
+
+def display_warning_message(message: str):
+    """Display a warning message"""
+    st.warning(f"⚠️ {message}")
+
+def display_info_message(message: str):
+    """Display an info message"""
+    st.info(f"ℹ️ {message}")
+
+def create_upload_area():
+    """Create a drag-and-drop upload area"""
+    uploaded_file = st.file_uploader(
+        "Upload Receipt Image",
+        type=['png', 'jpg', 'jpeg', 'pdf'],
+        help="Drag and drop or click to upload a receipt image",
+        accept_multiple_files=False
+    )
+    
+    return uploaded_file
+
+def create_filter_sidebar(df):
+    """Create filter controls in sidebar"""
+    st.sidebar.header("Filters")
+    
+    filters = {}
+    
+    # Date range filter
+    if 'date' in df.columns:
+        min_date = df['date'].min().date()
+        max_date = df['date'].max().date()
+        
+        filters['date_range'] = st.sidebar.date_input(
+            "Date Range",
+            value=(min_date, max_date),
+            min_value=min_date,
+            max_value=max_date
+        )
+    
+    # Category filter
+    if 'category' in df.columns:
+        categories = ['All'] + list(df['category'].unique())
+        filters['category'] = st.sidebar.selectbox("Category", categories)
+    
+    # Store filter
+    if 'store_name' in df.columns:
+        stores = ['All'] + list(df['store_name'].unique())
+        filters['store'] = st.sidebar.selectbox("Store", stores)
+    
+    # Amount range filter
+    if 'total' in df.columns:
+        min_amount = float(df['total'].min())
+        max_amount = float(df['total'].max())
+        filters['amount_range'] = st.sidebar.slider(
+            "Amount Range",
+            min_value=min_amount,
+            max_value=max_amount,
+            value=(min_amount, max_amount)
+        )
+    
+    return filters
+
+def apply_filters(df, filters):
+    """Apply filters to dataframe"""
+    filtered_df = df.copy()
+    
+    # Apply date filter
+    if 'date_range' in filters and len(filters['date_range']) == 2:
+        start_date, end_date = filters['date_range']
+        filtered_df = filtered_df[
+            (filtered_df['date'].dt.date >= start_date) & 
+            (filtered_df['date'].dt.date <= end_date)
+        ]
+    
+    # Apply category filter
+    if 'category' in filters and filters['category'] != 'All':
+        filtered_df = filtered_df[filtered_df['category'] == filters['category']]
+    
+    # Apply store filter
+    if 'store' in filters and filters['store'] != 'All':
+        filtered_df = filtered_df[filtered_df['store_name'] == filters['store']]
+    
+    # Apply amount filter
+    if 'amount_range' in filters:
+        min_amount, max_amount = filters['amount_range']
+        filtered_df = filtered_df[
+            (filtered_df['total'] >= min_amount) & 
+            (filtered_df['total'] <= max_amount)
+        ]
+    
+    return filtered_df
+
+def create_export_buttons(df, filename_prefix="receipts"):
+    """Create export buttons for data"""
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        if st.button("📄 Export CSV"):
+            csv_data = df.to_csv(index=False)
+            st.download_button(
+                label="Download CSV",
+                data=csv_data,
+                file_name=f"{filename_prefix}_{datetime.now().strftime('%Y%m%d')}.csv",
+                mime="text/csv"
+            )
+    
+    with col2:
+        if st.button("📊 Export Excel"):
+            import io
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                df.to_excel(writer, sheet_name='Data', index=False)
+            
+            st.download_button(
+                label="Download Excel",
+                data=output.getvalue(),
+                file_name=f"{filename_prefix}_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
 
 def process_quick_upload(uploaded_file):
     """Process a single uploaded file quickly."""

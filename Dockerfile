@@ -43,7 +43,7 @@ ENV PYTHONUNBUFFERED=1 \
 # Set build arguments
 ARG DEBIAN_FRONTEND=noninteractive
 
-# Install runtime system dependencies
+# Install runtime system dependencies including curl for health check
 RUN apt-get update && apt-get install -y --no-install-recommends \
     tesseract-ocr \
     tesseract-ocr-eng \
@@ -58,6 +58,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxrender-dev \
     libgomp1 \
     libgcc-s1 \
+    curl \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
 
@@ -74,27 +75,25 @@ WORKDIR /app
 RUN mkdir -p /app/data /app/uploads /app/logs \
     && chown -R appuser:appuser /app
 
-# Copy application code
+# Copy application code (only copy what exists)
 COPY --chown=appuser:appuser src/ ./src/
-COPY --chown=appuser:appuser tests/ ./tests/
 COPY --chown=appuser:appuser requirements.txt ./
 
 # Create .streamlit directory and config
-RUN mkdir -p /app/.streamlit
-COPY --chown=appuser:appuser <<EOF /app/.streamlit/config.toml
-[server]
-port = 8501
-address = "0.0.0.0"
-headless = true
-enableCORS = false
-enableXsrfProtection = false
-
-[browser]
-gatherUsageStats = false
-
-[theme]
-base = "light"
-EOF
+RUN mkdir -p /app/.streamlit && \
+    echo '[server]' > /app/.streamlit/config.toml && \
+    echo 'port = 8501' >> /app/.streamlit/config.toml && \
+    echo 'address = "0.0.0.0"' >> /app/.streamlit/config.toml && \
+    echo 'headless = true' >> /app/.streamlit/config.toml && \
+    echo 'enableCORS = false' >> /app/.streamlit/config.toml && \
+    echo 'enableXsrfProtection = false' >> /app/.streamlit/config.toml && \
+    echo '' >> /app/.streamlit/config.toml && \
+    echo '[browser]' >> /app/.streamlit/config.toml && \
+    echo 'gatherUsageStats = false' >> /app/.streamlit/config.toml && \
+    echo '' >> /app/.streamlit/config.toml && \
+    echo '[theme]' >> /app/.streamlit/config.toml && \
+    echo 'base = "light"' >> /app/.streamlit/config.toml && \
+    chown -R appuser:appuser /app/.streamlit
 
 # Switch to non-root user
 USER appuser

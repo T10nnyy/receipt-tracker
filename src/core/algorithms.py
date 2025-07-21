@@ -1,366 +1,230 @@
-import re
-import logging
-from typing import List, Dict, Any, Optional
-from datetime import datetime, timedelta
-from collections import defaultdict, Counter
+import pandas as pd
 import numpy as np
-from difflib import SequenceMatcher
-import Levenshtein
-
-from .models import Receipt, ReceiptItem
+from datetime import datetime, timedelta
+from typing import List, Dict, Any, Tuple
+from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
+import logging
 
 logger = logging.getLogger(__name__)
 
 class ReceiptAnalyzer:
-    """Analyzes receipts for patterns, insights, and search functionality"""
+    """Advanced analytics for receipt data"""
     
     def __init__(self):
-        self.stop_words = {
-            'the', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by',
-            'store', 'shop', 'market', 'receipt', 'total', 'subtotal', 'tax', 'amount'
-        }
+        """Initialize the analyzer"""
+        self.scaler = StandardScaler()
     
-    def search_receipts(self, query: str, receipts: List[Receipt]) -> List[Receipt]:
-        """Search receipts using fuzzy matching and relevance scoring"""
-        if not query.strip():
-            return receipts
-        
-        query_lower = query.lower().strip()
-        scored_receipts = []
-        
-        for receipt in receipts:
-            score = self._calculate_relevance_score(query_lower, receipt)
-            if score > 0:
-                scored_receipts.append((receipt, score))
-        
-        # Sort by relevance score (descending)
-        scored_receipts.sort(key=lambda x: x[1], reverse=True)
-        
-        return [receipt for receipt, score in scored_receipts]
-    
-    def _calculate_relevance_score(self, query: str, receipt: Receipt) -> float:
-        """Calculate relevance score for a receipt based on query"""
-        score = 0.0
-        
-        # Search in merchant name (high weight)
-        if receipt.merchant_name:
-            merchant_similarity = self._fuzzy_match(query, receipt.merchant_name.lower())
-            score += merchant_similarity * 3.0
-        
-        # Search in raw text (medium weight)
-        if receipt.raw_text:
-            text_similarity = self._text_contains_query(query, receipt.raw_text.lower())
-            score += text_similarity * 1.5
-        
-        # Search in items (high weight)
-        for item in receipt.items:
-            item_similarity = self._fuzzy_match(query, item.name.lower())
-            score += item_similarity * 2.0
-        
-        # Search in notes (medium weight)
-        if receipt.notes:
-            notes_similarity = self._fuzzy_match(query, receipt.notes.lower())
-            score += notes_similarity * 1.0
-        
-        # Exact matches get bonus points
-        if query in receipt.raw_text.lower():
-            score += 2.0
-        
-        return score
-    
-    def _fuzzy_match(self, query: str, text: str) -> float:
-        """Calculate fuzzy match score between query and text"""
-        if not query or not text:
-            return 0.0
-        
-        # Direct substring match
-        if query in text:
-            return 1.0
-        
-        # Levenshtein distance based similarity
-        max_len = max(len(query), len(text))
-        if max_len == 0:
-            return 0.0
-        
-        distance = Levenshtein.distance(query, text)
-        similarity = 1.0 - (distance / max_len)
-        
-        # Only return meaningful similarities
-        return similarity if similarity > 0.6 else 0.0
-    
-    def _text_contains_query(self, query: str, text: str) -> float:
-        """Check if text contains query words with partial matching"""
-        query_words = set(query.split()) - self.stop_words
-        text_words = set(text.split())
-        
-        if not query_words:
-            return 0.0
-        
-        matches = 0
-        for query_word in query_words:
-            # Exact word match
-            if query_word in text_words:
-                matches += 1
-                continue
-            
-            # Partial word match
-            for text_word in text_words:
-                if len(query_word) > 3 and query_word in text_word:
-                    matches += 0.5
-                    break
-        
-        return matches / len(query_words)
-    
-    def generate_analytics(self, receipts: List[Receipt]) -> Dict[str, Any]:
-        """Generate comprehensive analytics from receipts"""
+    def analyze_spending_patterns(self, receipts: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Analyze spending patterns from receipt data"""
         if not receipts:
-            return self._empty_analytics()
+            return {}
         
-        analytics = {
-            'total_receipts': len(receipts),
-            'total_amount': 0.0,
-            'average_amount': 0.0,
-            'unique_merchants': 0,
-            'date_range': {},
-            'top_merchants': {},
-            'spending_by_date': {},
-            'monthly_breakdown': [],
-            'category_breakdown': {},
-            'receipts_this_month': 0,
-            'amount_this_month': 0.0
-        }
+        df = pd.DataFrame(receipts)
         
-        try:
-            # Basic calculations
-            valid_amounts = [r.total_amount for r in receipts if r.total_amount and r.total_amount > 0]
-            analytics['total_amount'] = sum(valid_amounts)
-            analytics['average_amount'] = np.mean(valid_amounts) if valid_amounts else 0.0
-            
-            # Merchant analysis
-            merchant_spending = defaultdict(float)
-            merchants = set()
-            
-            for receipt in receipts:
-                if receipt.merchant_name:
-                    merchants.add(receipt.merchant_name)
-                    if receipt.total_amount:
-                        merchant_spending[receipt.merchant_name] += receipt.total_amount
-            
-            analytics['unique_merchants'] = len(merchants)
-            analytics['top_merchants'] = dict(
-                sorted(merchant_spending.items(), key=lambda x: x[1], reverse=True)[:10]
-            )
-            
-            # Date analysis
-            dates_with_amounts = [
-                (r.receipt_date, r.total_amount) 
-                for r in receipts 
-                if r.receipt_date and r.total_amount
-            ]
-            
-            if dates_with_amounts:
-                dates, amounts = zip(*dates_with_amounts)
-                analytics['date_range'] = {
-                    'start': min(dates).isoformat(),
-                    'end': max(dates).isoformat()
-                }
-                
-                # Spending by date
-                daily_spending = defaultdict(float)
-                for date, amount in dates_with_amounts:
-                    date_str = date.strftime('%Y-%m-%d')
-                    daily_spending[date_str] += amount
-                
-                analytics['spending_by_date'] = dict(daily_spending)
-                
-                # Monthly breakdown
-                monthly_data = defaultdict(lambda: {'count': 0, 'total': 0.0})
-                current_month = datetime.now().replace(day=1)
-                
-                for date, amount in dates_with_amounts:
-                    month_key = date.strftime('%Y-%m')
-                    monthly_data[month_key]['count'] += 1
-                    monthly_data[month_key]['total'] += amount
-                    
-                    # This month's data
-                    if date >= current_month:
-                        analytics['receipts_this_month'] += 1
-                        analytics['amount_this_month'] += amount
-                
-                analytics['monthly_breakdown'] = [
-                    {
-                        'month': month,
-                        'count': data['count'],
-                        'total': data['total'],
-                        'average': data['total'] / data['count']
-                    }
-                    for month, data in sorted(monthly_data.items(), reverse=True)
-                ]
-            
-            # Category analysis
-            category_spending = defaultdict(float)
-            for receipt in receipts:
-                if receipt.category and receipt.total_amount:
-                    category_spending[receipt.category] += receipt.total_amount
-            
-             
-                    category_spending[receipt.category] += receipt.total_amount
-            
-            analytics['category_breakdown'] = dict(category_spending)
-            
-            return analytics
-            
-        except Exception as e:
-            logger.error(f"Error generating analytics: {e}")
-            return self._empty_analytics()
-    
-    def _empty_analytics(self) -> Dict[str, Any]:
-        """Return empty analytics structure"""
-        return {
-            'total_receipts': 0,
-            'total_amount': 0.0,
-            'average_amount': 0.0,
-            'unique_merchants': 0,
-            'date_range': {},
-            'top_merchants': {},
-            'spending_by_date': {},
-            'monthly_breakdown': [],
-            'category_breakdown': {},
-            'receipts_this_month': 0,
-            'amount_this_month': 0.0
-        }
-    
-    def detect_patterns(self, receipts: List[Receipt]) -> List[Dict[str, Any]]:
-        """Detect spending patterns and generate insights"""
-        patterns = []
+        # Convert date strings to datetime
+        df['date'] = pd.to_datetime(df['date'])
+        df['day_of_week'] = df['date'].dt.day_name()
+        df['month'] = df['date'].dt.month_name()
+        df['hour'] = df['date'].dt.hour
         
-        if len(receipts) < 2:
-            return patterns
-        
-        try:
-            # Frequent merchants pattern
-            merchant_counts = Counter(
-                r.merchant_name for r in receipts 
-                if r.merchant_name
-            )
-            
-            if merchant_counts:
-                most_frequent = merchant_counts.most_common(1)[0]
-                if most_frequent[1] >= 3:
-                    patterns.append({
-                        'type': 'frequent_merchant',
-                        'description': f"You frequently shop at {most_frequent[0]} ({most_frequent[1]} times)",
-                        'confidence': min(most_frequent[1] / len(receipts), 1.0)
-                    })
-            
-            # High spending pattern
-            amounts = [r.total_amount for r in receipts if r.total_amount]
-            if amounts:
-                avg_amount = np.mean(amounts)
-                high_spending = [a for a in amounts if a > avg_amount * 2]
-                
-                if len(high_spending) > len(amounts) * 0.1:  # More than 10% are high spending
-                    patterns.append({
-                        'type': 'high_spending',
-                        'description': f"You have {len(high_spending)} receipts with unusually high amounts (>${avg_amount * 2:.2f}+)",
-                        'confidence': len(high_spending) / len(amounts)
-                    })
-            
-            # Weekend vs weekday spending
-            weekend_amounts = []
-            weekday_amounts = []
-            
-            for receipt in receipts:
-                if receipt.receipt_date and receipt.total_amount:
-                    if receipt.receipt_date.weekday() >= 5:  # Saturday = 5, Sunday = 6
-                        weekend_amounts.append(receipt.total_amount)
-                    else:
-                        weekday_amounts.append(receipt.total_amount)
-            
-            if weekend_amounts and weekday_amounts:
-                weekend_avg = np.mean(weekend_amounts)
-                weekday_avg = np.mean(weekday_amounts)
-                
-                if weekend_avg > weekday_avg * 1.5:
-                    patterns.append({
-                        'type': 'weekend_spending',
-                        'description': f"You spend significantly more on weekends (${weekend_avg:.2f} vs ${weekday_avg:.2f})",
-                        'confidence': min((weekend_avg - weekday_avg) / weekday_avg, 1.0)
-                    })
-            
-            # Monthly spending trend
-            monthly_totals = defaultdict(float)
-            for receipt in receipts:
-                if receipt.receipt_date and receipt.total_amount:
-                    month_key = receipt.receipt_date.strftime('%Y-%m')
-                    monthly_totals[month_key] += receipt.total_amount
-            
-            if len(monthly_totals) >= 3:
-                sorted_months = sorted(monthly_totals.items())
-                recent_months = sorted_months[-3:]
-                
-                if len(recent_months) == 3:
-                    trend = []
-                    for i in range(1, len(recent_months)):
-                        current = recent_months[i][1]
-                        previous = recent_months[i-1][1]
-                        change = (current - previous) / previous if previous > 0 else 0
-                        trend.append(change)
-                    
-                    avg_trend = np.mean(trend)
-                    if avg_trend > 0.2:  # 20% increase trend
-                        patterns.append({
-                            'type': 'increasing_spending',
-                            'description': f"Your spending has been increasing over the last 3 months (average {avg_trend*100:.1f}% per month)",
-                            'confidence': min(abs(avg_trend), 1.0)
-                        })
-                    elif avg_trend < -0.2:  # 20% decrease trend
-                        patterns.append({
-                            'type': 'decreasing_spending',
-                            'description': f"Your spending has been decreasing over the last 3 months (average {abs(avg_trend)*100:.1f}% per month)",
-                            'confidence': min(abs(avg_trend), 1.0)
-                        })
-            
-            return patterns
-            
-        except Exception as e:
-            logger.error(f"Error detecting patterns: {e}")
-            return []
-    
-    def categorize_receipt(self, receipt: Receipt) -> str:
-        """Automatically categorize a receipt based on merchant and items"""
-        try:
-            # Category keywords mapping
-            categories = {
-                'Groceries': ['grocery', 'supermarket', 'market', 'food', 'walmart', 'target', 'kroger', 'safeway'],
-                'Restaurants': ['restaurant', 'cafe', 'coffee', 'pizza', 'burger', 'diner', 'bistro', 'grill'],
-                'Gas': ['gas', 'fuel', 'shell', 'exxon', 'bp', 'chevron', 'mobil'],
-                'Shopping': ['store', 'shop', 'mall', 'retail', 'amazon', 'ebay'],
-                'Healthcare': ['pharmacy', 'medical', 'doctor', 'hospital', 'clinic', 'cvs', 'walgreens'],
-                'Entertainment': ['movie', 'theater', 'cinema', 'game', 'entertainment', 'netflix'],
-                'Transportation': ['uber', 'lyft', 'taxi', 'bus', 'train', 'parking'],
-                'Utilities': ['electric', 'water', 'internet', 'phone', 'utility']
+        analysis = {
+            'total_spending': df['total'].sum(),
+            'average_receipt': df['total'].mean(),
+            'median_receipt': df['total'].median(),
+            'spending_by_day': df.groupby('day_of_week')['total'].sum().to_dict(),
+            'spending_by_month': df.groupby('month')['total'].sum().to_dict(),
+            'spending_by_category': df.groupby('category')['total'].sum().to_dict(),
+            'most_frequent_stores': df['store_name'].value_counts().head(5).to_dict(),
+            'receipt_frequency': len(df),
+            'date_range': {
+                'start': df['date'].min().isoformat(),
+                'end': df['date'].max().isoformat()
             }
-            
-            text_to_check = ""
-            if receipt.merchant_name:
-                text_to_check += receipt.merchant_name.lower() + " "
-            if receipt.raw_text:
-                text_to_check += receipt.raw_text.lower() + " "
-            
-            # Score each category
-            category_scores = {}
-            for category, keywords in categories.items():
-                score = sum(1 for keyword in keywords if keyword in text_to_check)
-                if score > 0:
-                    category_scores[category] = score
-            
-            # Return the highest scoring category
-            if category_scores:
-                return max(category_scores, key=category_scores.get)
-            
-            return 'Other'
-            
-        except Exception as e:
-            logger.error(f"Error categorizing receipt: {e}")
-            return 'Other'
+        }
+        
+        return analysis
+    
+    def detect_spending_anomalies(self, receipts: List[Dict[str, Any]], threshold: float = 2.0) -> List[Dict[str, Any]]:
+        """Detect unusual spending patterns"""
+        if not receipts:
+            return []
+        
+        df = pd.DataFrame(receipts)
+        
+        # Calculate z-scores for spending amounts
+        mean_spending = df['total'].mean()
+        std_spending = df['total'].std()
+        
+        if std_spending == 0:
+            return []
+        
+        df['z_score'] = (df['total'] - mean_spending) / std_spending
+        
+        # Find anomalies
+        anomalies = df[abs(df['z_score']) > threshold]
+        
+        return anomalies.to_dict('records')
+    
+    def predict_monthly_spending(self, receipts: List[Dict[str, Any]]) -> Dict[str, float]:
+        """Predict spending for the current month based on historical data"""
+        if not receipts:
+            return {'predicted_total': 0.0, 'confidence': 0.0}
+        
+        df = pd.DataFrame(receipts)
+        df['date'] = pd.to_datetime(df['date'])
+        
+        # Group by month
+        monthly_spending = df.groupby(df['date'].dt.to_period('M'))['total'].sum()
+        
+        if len(monthly_spending) < 2:
+            return {'predicted_total': 0.0, 'confidence': 0.0}
+        
+        # Simple linear trend prediction
+        values = monthly_spending.values
+        trend = np.polyfit(range(len(values)), values, 1)
+        
+        # Predict next month
+        predicted = trend[0] * len(values) + trend[1]
+        
+        # Calculate confidence based on variance
+        variance = np.var(values)
+        confidence = max(0, 1 - (variance / (predicted ** 2)) if predicted != 0 else 0)
+        
+        return {
+            'predicted_total': max(0, predicted),
+            'confidence': min(1.0, confidence)
+        }
+    
+    def cluster_spending_behavior(self, receipts: List[Dict[str, Any]], n_clusters: int = 3) -> Dict[str, Any]:
+        """Cluster receipts by spending behavior"""
+        if not receipts or len(receipts) < n_clusters:
+            return {}
+        
+        df = pd.DataFrame(receipts)
+        df['date'] = pd.to_datetime(df['date'])
+        
+        # Create features for clustering
+        features = []
+        for _, receipt in df.iterrows():
+            feature_vector = [
+                receipt['total'],
+                receipt['date'].weekday(),  # Day of week
+                receipt['date'].hour if 'hour' in receipt else 12,  # Hour of day
+                len(receipt.get('items', [])),  # Number of items
+            ]
+            features.append(feature_vector)
+        
+        features_array = np.array(features)
+        
+        # Normalize features
+        features_scaled = self.scaler.fit_transform(features_array)
+        
+        # Perform clustering
+        kmeans = KMeans(n_clusters=n_clusters, random_state=42)
+        clusters = kmeans.fit_predict(features_scaled)
+        
+        # Analyze clusters
+        df['cluster'] = clusters
+        cluster_analysis = {}
+        
+        for i in range(n_clusters):
+            cluster_data = df[df['cluster'] == i]
+            cluster_analysis[f'cluster_{i}'] = {
+                'size': len(cluster_data),
+                'avg_spending': cluster_data['total'].mean(),
+                'common_stores': cluster_data['store_name'].value_counts().head(3).to_dict(),
+                'common_categories': cluster_data['category'].value_counts().head(3).to_dict(),
+                'description': self._describe_cluster(cluster_data)
+            }
+        
+        return cluster_analysis
+    
+    def _describe_cluster(self, cluster_data: pd.DataFrame) -> str:
+        """Generate a description for a spending cluster"""
+        avg_total = cluster_data['total'].mean()
+        most_common_store = cluster_data['store_name'].mode().iloc[0] if not cluster_data['store_name'].mode().empty else 'Various'
+        most_common_category = cluster_data['category'].mode().iloc[0] if not cluster_data['category'].mode().empty else 'Mixed'
+        
+        if avg_total < 20:
+            spending_level = "low"
+        elif avg_total < 100:
+            spending_level = "medium"
+        else:
+            spending_level = "high"
+        
+        return f"{spending_level.title()} spending cluster, primarily at {most_common_store} for {most_common_category} purchases"
+    
+    def calculate_savings_opportunities(self, receipts: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Identify potential savings opportunities"""
+        if not receipts:
+            return {}
+        
+        df = pd.DataFrame(receipts)
+        df['date'] = pd.to_datetime(df['date'])
+        
+        # Calculate monthly spending by category
+        monthly_category_spending = df.groupby([
+            df['date'].dt.to_period('M'), 
+            'category'
+        ])['total'].sum().unstack(fill_value=0)
+        
+        opportunities = {}
+        
+        # Find categories with increasing spending
+        for category in monthly_category_spending.columns:
+            values = monthly_category_spending[category].values
+            if len(values) >= 3:
+                # Check if spending is increasing
+                trend = np.polyfit(range(len(values)), values, 1)[0]
+                if trend > 0:
+                    current_monthly = values[-1]
+                    potential_savings = trend * 12  # Annual increase
+                    opportunities[category] = {
+                        'monthly_spending': current_monthly,
+                        'increasing_trend': trend,
+                        'potential_annual_savings': potential_savings,
+                        'recommendation': f"Consider budgeting for {category} - spending is increasing by ${trend:.2f}/month"
+                    }
+        
+        return opportunities
+    
+    def generate_spending_insights(self, receipts: List[Dict[str, Any]]) -> List[str]:
+        """Generate actionable insights from spending data"""
+        insights = []
+        
+        if not receipts:
+            return ["No receipt data available for analysis."]
+        
+        df = pd.DataFrame(receipts)
+        df['date'] = pd.to_datetime(df['date'])
+        
+        # Insight 1: Most expensive category
+        category_spending = df.groupby('category')['total'].sum()
+        top_category = category_spending.idxmax()
+        top_amount = category_spending.max()
+        insights.append(f"Your highest spending category is {top_category} with ${top_amount:.2f} total.")
+        
+        # Insight 2: Shopping frequency
+        days_between_receipts = df['date'].diff().dt.days.mean()
+        if not pd.isna(days_between_receipts):
+            insights.append(f"You shop approximately every {days_between_receipts:.1f} days.")
+        
+        # Insight 3: Weekend vs weekday spending
+        df['is_weekend'] = df['date'].dt.weekday >= 5
+        weekend_avg = df[df['is_weekend']]['total'].mean()
+        weekday_avg = df[~df['is_weekend']]['total'].mean()
+        
+        if weekend_avg > weekday_avg * 1.2:
+            insights.append(f"You spend {((weekend_avg/weekday_avg - 1) * 100):.0f}% more on weekends.")
+        elif weekday_avg > weekend_avg * 1.2:
+            insights.append(f"You spend {((weekday_avg/weekend_avg - 1) * 100):.0f}% more on weekdays.")
+        
+        # Insight 4: Store loyalty
+        store_counts = df['store_name'].value_counts()
+        if len(store_counts) > 1:
+            top_store = store_counts.index[0]
+            store_percentage = (store_counts.iloc[0] / len(df)) * 100
+            insights.append(f"You shop most frequently at {top_store} ({store_percentage:.0f}% of receipts).")
+        
+        return insights

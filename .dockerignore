@@ -63,10 +63,15 @@ docker-compose*
 docs/
 *.md
 
-# Tests (optional - remove if you want to include tests)
-tests/
+# Tests (commented out since tests directory doesn't exist)
+# tests/
 
 # Temporary files
 tmp/
 temp/
 *.tmp
+
+# Railway/Deployment files
+Procfile
+nixpacks.toml
+railway.json

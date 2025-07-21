@@ -15,462 +15,375 @@ import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 import numpy as np
-import logging
-from collections import defaultdict
+import sys
+import os
 
-from core.database import DatabaseManager
+# Add the src directory to the Python path
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from core.database import ReceiptDatabase
 from core.algorithms import ReceiptAnalyzer
 
-logger = logging.getLogger(__name__)
-
+# Page configuration
 st.set_page_config(
     page_title="Analytics Dashboard - Receipt Processor",
-    page_icon="📊",
+    page_icon="📈",
     layout="wide"
 )
 
 # Initialize components
-if 'db_manager' not in st.session_state:
-    st.session_state.db_manager = DatabaseManager()
+if 'db' not in st.session_state:
+    st.session_state.db = ReceiptDatabase()
+
 if 'analyzer' not in st.session_state:
     st.session_state.analyzer = ReceiptAnalyzer()
 
 def main():
-    st.title("📊 Analytics Dashboard")
-    st.markdown("Comprehensive insights into your spending patterns")
+    st.title("📈 Analytics Dashboard")
+    st.markdown("Advanced analytics and insights for your spending patterns")
     
     try:
-        receipts = st.session_state.db_manager.get_all_receipts()
+        # Load data
+        receipts = st.session_state.db.get_all_receipts()
         
         if not receipts:
-            st.info("📝 No receipts found. Upload some receipts first!")
-            if st.button("Go to Upload Page"):
-                st.switch_page("src/app.py")
+            st.warning("No receipts found. Please upload some receipts first!")
             return
         
-        # Generate analytics
-        analytics = st.session_state.analyzer.generate_analytics(receipts)
+        # Convert to list of dictionaries for analyzer
+        receipt_data = [receipt.to_dict() for receipt in receipts]
+        df = pd.DataFrame(receipt_data)
+        df['date'] = pd.to_datetime(df['date'])
         
         # Time period selector
         col1, col2 = st.columns([3, 1])
         with col2:
             time_period = st.selectbox(
-                "📅 Time Period",
-                ["All Time", "Last 30 Days", "Last 90 Days", "Last Year"],
-                index=0
+                "Analysis Period",
+                ["All Time", "Last 30 Days", "Last 90 Days", "Last Year"]
             )
         
-        # Filter receipts based on time period
-        filtered_receipts = filter_by_time_period(receipts, time_period)
+        # Filter data based on time period
+        if time_period == "Last 30 Days":
+            cutoff_date = datetime.now() - timedelta(days=30)
+            filtered_df = df[df['date'] >= cutoff_date]
+        elif time_period == "Last 90 Days":
+            cutoff_date = datetime.now() - timedelta(days=90)
+            filtered_df = df[df['date'] >= cutoff_date]
+        elif time_period == "Last Year":
+            cutoff_date = datetime.now() - timedelta(days=365)
+            filtered_df = df[df['date'] >= cutoff_date]
+        else:
+            filtered_df = df
         
-        if time_period != "All Time":
-            analytics = st.session_state.analyzer.generate_analytics(filtered_receipts)
+        # Convert back to receipt format for analyzer
+        filtered_receipt_data = filtered_df.to_dict('records')
         
-        # Key Metrics Row
-        display_key_metrics(analytics)
+        # Main dashboard tabs
+        tab1, tab2, tab3, tab4 = st.tabs(["📊 Overview", "🎯 Patterns", "🔮 Predictions", "💡 Insights"])
         
-        st.divider()
+        with tab1:
+            st.header("Spending Overview")
+            
+            # Key metrics
+            col1, col2, col3, col4 = st.columns(4)
+            
+            total_spent = filtered_df['total'].sum()
+            avg_receipt = filtered_df['total'].mean()
+            receipt_count = len(filtered_df)
+            days_span = (filtered_df['date'].max() - filtered_df['date'].min()).days + 1
+            
+            with col1:
+                st.metric("Total Spent", f"${total_spent:.2f}")
+            with col2:
+                st.metric("Average Receipt", f"${avg_receipt:.2f}")
+            with col3:
+                st.metric("Total Receipts", receipt_count)
+            with col4:
+                st.metric("Daily Average", f"${total_spent/max(days_span, 1):.2f}")
+            
+            # Spending trend
+            st.subheader("Spending Trend")
+            daily_spending = filtered_df.groupby(filtered_df['date'].dt.date)['total'].sum().reset_index()
+            daily_spending['cumulative'] = daily_spending['total'].cumsum()
+            
+            fig_trend = go.Figure()
+            fig_trend.add_trace(go.Scatter(
+                x=daily_spending['date'],
+                y=daily_spending['total'],
+                mode='lines+markers',
+                name='Daily Spending',
+                line=dict(color='blue')
+            ))
+            fig_trend.add_trace(go.Scatter(
+                x=daily_spending['date'],
+                y=daily_spending['cumulative'],
+                mode='lines',
+                name='Cumulative Spending',
+                yaxis='y2',
+                line=dict(color='red', dash='dash')
+            ))
+            
+            fig_trend.update_layout(
+                title='Daily and Cumulative Spending',
+                xaxis_title='Date',
+                yaxis_title='Daily Spending ($)',
+                yaxis2=dict(
+                    title='Cumulative Spending ($)',
+                    overlaying='y',
+                    side='right'
+                ),
+                hovermode='x unified'
+            )
+            
+            st.plotly_chart(fig_trend, use_container_width=True)
+            
+            # Category and store breakdown
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.subheader("Spending by Category")
+                category_data = filtered_df.groupby('category').agg({
+                    'total': ['sum', 'count', 'mean']
+                }).round(2)
+                category_data.columns = ['Total Spent', 'Receipt Count', 'Avg per Receipt']
+                category_data = category_data.sort_values('Total Spent', ascending=False)
+                
+                # Create pie chart
+                fig_cat = px.pie(
+                    values=category_data['Total Spent'],
+                    names=category_data.index,
+                    title='Spending Distribution by Category'
+                )
+                st.plotly_chart(fig_cat, use_container_width=True)
+                
+                # Show table
+                st.dataframe(category_data, use_container_width=True)
+            
+            with col2:
+                st.subheader("Top Stores")
+                store_data = filtered_df.groupby('store_name').agg({
+                    'total': ['sum', 'count', 'mean']
+                }).round(2)
+                store_data.columns = ['Total Spent', 'Visit Count', 'Avg per Visit']
+                store_data = store_data.sort_values('Total Spent', ascending=False).head(10)
+                
+                # Create bar chart
+                fig_store = px.bar(
+                    x=store_data['Total Spent'],
+                    y=store_data.index,
+                    orientation='h',
+                    title='Top 10 Stores by Spending'
+                )
+                fig_store.update_layout(yaxis={'categoryorder': 'total ascending'})
+                st.plotly_chart(fig_store, use_container_width=True)
+                
+                # Show table
+                st.dataframe(store_data, use_container_width=True)
         
-        # Charts Row 1
-        col1, col2 = st.columns(2)
+        with tab2:
+            st.header("Spending Patterns")
+            
+            # Analyze patterns
+            patterns = st.session_state.analyzer.analyze_spending_patterns(filtered_receipt_data)
+            
+            if patterns:
+                # Day of week patterns
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.subheader("Spending by Day of Week")
+                    if 'spending_by_day' in patterns:
+                        dow_data = patterns['spending_by_day']
+                        days_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+                        dow_df = pd.DataFrame([
+                            {'day': day, 'spending': dow_data.get(day, 0)} 
+                            for day in days_order
+                        ])
+                        
+                        fig_dow = px.bar(dow_df, x='day', y='spending', title='Weekly Spending Pattern')
+                        st.plotly_chart(fig_dow, use_container_width=True)
+                
+                with col2:
+                    st.subheader("Monthly Spending")
+                    if 'spending_by_month' in patterns:
+                        month_data = patterns['spending_by_month']
+                        month_df = pd.DataFrame([
+                            {'month': month, 'spending': amount} 
+                            for month, amount in month_data.items()
+                        ])
+                        
+                        fig_month = px.bar(month_df, x='month', y='spending', title='Monthly Spending Pattern')
+                        st.plotly_chart(fig_month, use_container_width=True)
+                
+                # Heatmap of spending patterns
+                st.subheader("Spending Heatmap")
+                filtered_df['day_of_week'] = filtered_df['date'].dt.day_name()
+                filtered_df['hour'] = filtered_df['date'].dt.hour
+                
+                # Create heatmap data
+                heatmap_data = filtered_df.groupby(['day_of_week', 'hour'])['total'].sum().unstack(fill_value=0)
+                
+                # Reorder days
+                day_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+                heatmap_data = heatmap_data.reindex(day_order)
+                
+                fig_heatmap = px.imshow(
+                    heatmap_data.values,
+                    x=heatmap_data.columns,
+                    y=heatmap_data.index,
+                    title='Spending Patterns by Day and Hour',
+                    labels={'x': 'Hour of Day', 'y': 'Day of Week', 'color': 'Total Spent ($)'}
+                )
+                st.plotly_chart(fig_heatmap, use_container_width=True)
+                
+                # Clustering analysis
+                st.subheader("Spending Behavior Clusters")
+                clusters = st.session_state.analyzer.cluster_spending_behavior(filtered_receipt_data)
+                
+                if clusters:
+                    for cluster_name, cluster_info in clusters.items():
+                        with st.expander(f"Cluster {cluster_name.split('_')[1]} - {cluster_info['description']}"):
+                            col1, col2 = st.columns(2)
+                            
+                            with col1:
+                                st.write(f"**Size:** {cluster_info['size']} receipts")
+                                st.write(f"**Average Spending:** ${cluster_info['avg_spending']:.2f}")
+                            
+                            with col2:
+                                st.write("**Common Stores:**")
+                                for store, count in cluster_info['common_stores'].items():
+                                    st.write(f"• {store}: {count} visits")
         
-        with col1:
-            display_spending_over_time(filtered_receipts)
+        with tab3:
+            st.header("Spending Predictions")
+            
+            # Monthly prediction
+            prediction = st.session_state.analyzer.predict_monthly_spending(filtered_receipt_data)
+            
+            if prediction and prediction['predicted_total'] > 0:
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.metric(
+                        "Predicted Monthly Spending",
+                        f"${prediction['predicted_total']:.2f}",
+                        help=f"Confidence: {prediction['confidence']:.1%}"
+                    )
+                
+                with col2:
+                    confidence_color = "green" if prediction['confidence'] > 0.7 else "orange" if prediction['confidence'] > 0.4 else "red"
+                    st.markdown(f"**Prediction Confidence:** :{confidence_color}[{prediction['confidence']:.1%}]")
+                
+                # Show prediction chart
+                monthly_spending = filtered_df.groupby(filtered_df['date'].dt.to_period('M'))['total'].sum()
+                
+                fig_pred = go.Figure()
+                
+                # Historical data
+                fig_pred.add_trace(go.Scatter(
+                    x=[str(period) for period in monthly_spending.index],
+                    y=monthly_spending.values,
+                    mode='lines+markers',
+                    name='Historical Spending',
+                    line=dict(color='blue')
+                ))
+                
+                # Prediction
+                next_month = pd.Period.now('M') + 1
+                fig_pred.add_trace(go.Scatter(
+                    x=[str(next_month)],
+                    y=[prediction['predicted_total']],
+                    mode='markers',
+                    name='Predicted Spending',
+                    marker=dict(color='red', size=10)
+                ))
+                
+                fig_pred.update_layout(
+                    title='Monthly Spending Prediction',
+                    xaxis_title='Month',
+                    yaxis_title='Spending ($)'
+                )
+                
+                st.plotly_chart(fig_pred, use_container_width=True)
+            
+            # Anomaly detection
+            st.subheader("Spending Anomalies")
+            anomalies = st.session_state.analyzer.detect_spending_anomalies(filtered_receipt_data)
+            
+            if anomalies:
+                st.write(f"Found {len(anomalies)} unusual spending patterns:")
+                
+                anomaly_df = pd.DataFrame(anomalies)
+                anomaly_df['date'] = pd.to_datetime(anomaly_df['date'])
+                
+                for _, anomaly in anomaly_df.head(10).iterrows():
+                    severity = "🔴" if abs(anomaly['z_score']) > 3 else "🟡"
+                    st.write(f"{severity} **${anomaly['total']:.2f}** at {anomaly['store_name']} on {anomaly['date'].strftime('%Y-%m-%d')} (Z-score: {anomaly['z_score']:.2f})")
+            else:
+                st.info("No spending anomalies detected in the selected period.")
         
-        with col2:
-            display_top_merchants(analytics)
-        
-        st.divider()
-        
-        # Charts Row 2
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            display_category_breakdown(filtered_receipts)
-        
-        with col2:
-            display_monthly_trends(analytics)
-        
-        st.divider()
-        
-        # Advanced Analytics
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            display_spending_patterns(filtered_receipts)
-        
-        with col2:
-            display_insights_and_patterns(filtered_receipts)
-        
-        st.divider()
-        
-        # Detailed Tables
-        display_detailed_analytics(analytics, filtered_receipts)
+        with tab4:
+            st.header("Spending Insights")
+            
+            # Generate insights
+            insights = st.session_state.analyzer.generate_spending_insights(filtered_receipt_data)
+            
+            st.subheader("Key Insights")
+            for i, insight in enumerate(insights, 1):
+                st.info(f"**Insight {i}:** {insight}")
+            
+            # Savings opportunities
+            st.subheader("Savings Opportunities")
+            savings_ops = st.session_state.analyzer.calculate_savings_opportunities(filtered_receipt_data)
+            
+            if savings_ops:
+                for category, opportunity in savings_ops.items():
+                    with st.expander(f"💰 {category} - Potential Annual Savings: ${opportunity['potential_annual_savings']:.2f}"):
+                        st.write(f"**Current Monthly Spending:** ${opportunity['monthly_spending']:.2f}")
+                        st.write(f"**Monthly Increase Trend:** ${opportunity['increasing_trend']:.2f}")
+                        st.write(f"**Recommendation:** {opportunity['recommendation']}")
+            else:
+                st.info("No specific savings opportunities identified. Keep tracking your spending!")
+            
+            # Spending goals
+            st.subheader("Set Spending Goals")
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                monthly_goal = st.number_input(
+                    "Monthly Spending Goal ($)",
+                    min_value=0.0,
+                    value=float(filtered_df['total'].sum() / max(1, len(filtered_df.groupby(filtered_df['date'].dt.to_period('M'))))),
+                    step=50.0
+                )
+            
+            with col2:
+                current_month_spending = filtered_df[
+                    filtered_df['date'].dt.to_period('M') == pd.Period.now('M')
+                ]['total'].sum()
+                
+                progress = min(current_month_spending / monthly_goal, 1.0) if monthly_goal > 0 else 0
+                
+                st.metric(
+                    "This Month's Progress",
+                    f"${current_month_spending:.2f}",
+                    f"{progress:.1%} of goal"
+                )
+                
+                # Progress bar
+                st.progress(progress)
+                
+                if progress > 1.0:
+                    st.warning("⚠️ You've exceeded your monthly goal!")
+                elif progress > 0.8:
+                    st.warning("⚠️ You're approaching your monthly limit!")
+                else:
+                    st.success("✅ You're on track with your spending goal!")
     
     except Exception as e:
-        logger.error(f"Error in analytics dashboard: {e}")
-        st.error(f"❌ Error generating analytics: {str(e)}")
-
-def filter_by_time_period(receipts, period):
-    """Filter receipts based on selected time period"""
-    if period == "All Time":
-        return receipts
-    
-    now = datetime.now()
-    
-    if period == "Last 30 Days":
-        cutoff = now - timedelta(days=30)
-    elif period == "Last 90 Days":
-        cutoff = now - timedelta(days=90)
-    elif period == "Last Year":
-        cutoff = now - timedelta(days=365)
-    else:
-        return receipts
-    
-    return [r for r in receipts if r.receipt_date and r.receipt_date >= cutoff]
-
-def display_key_metrics(analytics):
-    """Display key metrics in a row of columns"""
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        st.metric(
-            "📊 Total Receipts",
-            analytics['total_receipts'],
-            delta=f"+{analytics.get('receipts_this_month', 0)} this month"
-        )
-    
-    with col2:
-        st.metric(
-            "💰 Total Spent",
-            f"${analytics['total_amount']:.2f}",
-            delta=f"${analytics.get('amount_this_month', 0):.2f} this month"
-        )
-    
-    with col3:
-        st.metric(
-            "📈 Average Receipt",
-            f"${analytics['average_amount']:.2f}"
-        )
-    
-    with col4:
-        st.metric(
-            "🏪 Unique Merchants",
-            analytics['unique_merchants']
-        )
-
-def display_spending_over_time(receipts):
-    """Display spending over time chart"""
-    st.subheader("📈 Spending Over Time")
-    
-    # Prepare data
-    daily_spending = defaultdict(float)
-    for receipt in receipts:
-        if receipt.receipt_date and receipt.total_amount:
-            date_str = receipt.receipt_date.strftime('%Y-%m-%d')
-            daily_spending[date_str] += receipt.total_amount
-    
-    if not daily_spending:
-        st.info("No spending data available for the selected period")
-        return
-    
-    # Create DataFrame
-    df = pd.DataFrame([
-        {'Date': date, 'Amount': amount}
-        for date, amount in sorted(daily_spending.items())
-    ])
-    df['Date'] = pd.to_datetime(df['Date'])
-    
-    # Create chart
-    fig = px.line(
-        df, 
-        x='Date', 
-        y='Amount',
-        title="Daily Spending",
-        labels={'Amount': 'Amount ($)', 'Date': 'Date'}
-    )
-    
-    fig.update_layout(
-        xaxis_title="Date",
-        yaxis_title="Amount ($)",
-        hovermode='x unified'
-    )
-    
-    st.plotly_chart(fig, use_container_width=True)
-
-def display_top_merchants(analytics):
-    """Display top merchants chart"""
-    st.subheader("🏪 Top Merchants")
-    
-    top_merchants = analytics.get('top_merchants', {})
-    
-    if not top_merchants:
-        st.info("No merchant data available")
-        return
-    
-    # Prepare data
-    merchants = list(top_merchants.keys())[:10]  # Top 10
-    amounts = [top_merchants[m] for m in merchants]
-    
-    # Create horizontal bar chart
-    fig = px.bar(
-        x=amounts,
-        y=merchants,
-        orientation='h',
-        title="Spending by Merchant",
-        labels={'x': 'Amount ($)', 'y': 'Merchant'}
-    )
-    
-    fig.update_layout(
-        xaxis_title="Amount ($)",
-        yaxis_title="Merchant",
-        yaxis={'categoryorder': 'total ascending'}
-    )
-    
-    st.plotly_chart(fig, use_container_width=True)
-
-def display_category_breakdown(receipts):
-    """Display category breakdown pie chart"""
-    st.subheader("📂 Category Breakdown")
-    
-    # Calculate category spending
-    category_spending = defaultdict(float)
-    uncategorized_amount = 0
-    
-    for receipt in receipts:
-        if receipt.total_amount:
-            if receipt.category:
-                category_spending[receipt.category] += receipt.total_amount
-            else:
-                uncategorized_amount += receipt.total_amount
-    
-    if uncategorized_amount > 0:
-        category_spending['Uncategorized'] = uncategorized_amount
-    
-    if not category_spending:
-        st.info("No category data available")
-        return
-    
-    # Create pie chart
-    fig = px.pie(
-        values=list(category_spending.values()),
-        names=list(category_spending.keys()),
-        title="Spending by Category"
-    )
-    
-    fig.update_traces(textposition='inside', textinfo='percent+label')
-    
-    st.plotly_chart(fig, use_container_width=True)
-
-def display_monthly_trends(analytics):
-    """Display monthly spending trends"""
-    st.subheader("📅 Monthly Trends")
-    
-    monthly_data = analytics.get('monthly_breakdown', [])
-    
-    if not monthly_data:
-        st.info("No monthly data available")
-        return
-    
-    # Prepare data
-    df = pd.DataFrame(monthly_data)
-    df = df.sort_values('month')
-    
-    # Create chart with dual y-axis
-    fig = go.Figure()
-    
-    # Add spending amount bars
-    fig.add_trace(go.Bar(
-        x=df['month'],
-        y=df['total'],
-        name='Total Spending',
-        yaxis='y',
-        marker_color='lightblue'
-    ))
-    
-    # Add receipt count line
-    fig.add_trace(go.Scatter(
-        x=df['month'],
-        y=df['count'],
-        mode='lines+markers',
-        name='Receipt Count',
-        yaxis='y2',
-        line=dict(color='red', width=2)
-    ))
-    
-    # Update layout
-    fig.update_layout(
-        title='Monthly Spending and Receipt Count',
-        xaxis_title='Month',
-        yaxis=dict(
-            title='Amount ($)',
-            side='left'
-        ),
-        yaxis2=dict(
-            title='Receipt Count',
-            side='right',
-            overlaying='y'
-        ),
-        hovermode='x unified'
-    )
-    
-    st.plotly_chart(fig, use_container_width=True)
-
-def display_spending_patterns(receipts):
-    """Display spending patterns analysis"""
-    st.subheader("🔍 Spending Patterns")
-    
-    # Day of week analysis
-    dow_spending = defaultdict(float)
-    dow_names = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
-    
-    for receipt in receipts:
-        if receipt.receipt_date and receipt.total_amount:
-            dow = receipt.receipt_date.weekday()
-            dow_spending[dow_names[dow]] += receipt.total_amount
-    
-    if dow_spending:
-        # Create bar chart
-        fig = px.bar(
-            x=list(dow_spending.keys()),
-            y=list(dow_spending.values()),
-            title="Spending by Day of Week",
-            labels={'x': 'Day of Week', 'y': 'Amount ($)'}
-        )
-        
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("No day-of-week data available")
-    
-    # Hour of day analysis (if timestamp available)
-    hour_spending = defaultdict(float)
-    hour_count = defaultdict(int)
-    
-    for receipt in receipts:
-        if receipt.receipt_date and receipt.total_amount:
-            hour = receipt.receipt_date.hour
-            hour_spending[hour] += receipt.total_amount
-            hour_count[hour] += 1
-    
-    if hour_spending:
-        hours = sorted(hour_spending.keys())
-        amounts = [hour_spending[h] for h in hours]
-        
-        fig = px.bar(
-            x=hours,
-            y=amounts,
-            title="Spending by Hour of Day",
-            labels={'x': 'Hour', 'y': 'Amount ($)'}
-        )
-        
-        st.plotly_chart(fig, use_container_width=True)
-
-def display_insights_and_patterns(receipts):
-    """Display AI-generated insights and patterns"""
-    st.subheader("🧠 AI Insights")
-    
-    patterns = st.session_state.analyzer.detect_patterns(receipts)
-    
-    if patterns:
-        for pattern in patterns:
-            # Color code based on pattern type
-            if pattern['type'] in ['high_spending', 'increasing_spending']:
-                st.warning(f"⚠️ {pattern['description']}")
-            elif pattern['type'] in ['decreasing_spending']:
-                st.success(f"✅ {pattern['description']}")
-            else:
-                st.info(f"💡 {pattern['description']}")
-    else:
-        st.info("🔍 No significant patterns detected yet. Upload more receipts for better insights!")
-    
-    # Additional insights
-    if len(receipts) >= 5:
-        st.subheader("📊 Quick Stats")
-        
-        # Most expensive receipt
-        most_expensive = max(receipts, key=lambda r: r.total_amount or 0)
-        if most_expensive.total_amount:
-            st.write(f"💸 **Most expensive receipt:** ${most_expensive.total_amount:.2f} at {most_expensive.merchant_name or 'Unknown'}")
-        
-        # Most frequent merchant
-        merchant_counts = defaultdict(int)
-        for receipt in receipts:
-            if receipt.merchant_name:
-                merchant_counts[receipt.merchant_name] += 1
-        
-        if merchant_counts:
-            most_frequent_merchant = max(merchant_counts, key=merchant_counts.get)
-            st.write(f"🏪 **Most frequent merchant:** {most_frequent_merchant} ({merchant_counts[most_frequent_merchant]} visits)")
-        
-        # Average days between receipts
-        dates = [r.receipt_date for r in receipts if r.receipt_date]
-        if len(dates) >= 2:
-            dates.sort()
-            intervals = [(dates[i] - dates[i-1]).days for i in range(1, len(dates))]
-            avg_interval = sum(intervals) / len(intervals)
-            st.write(f"📅 **Average days between receipts:** {avg_interval:.1f} days")
-
-def display_detailed_analytics(analytics, receipts):
-    """Display detailed analytics tables"""
-    st.subheader("📋 Detailed Analytics")
-    
-    tab1, tab2, tab3 = st.tabs(["Monthly Summary", "Merchant Analysis", "Category Analysis"])
-    
-    with tab1:
-        if analytics.get('monthly_breakdown'):
-            df = pd.DataFrame(analytics['monthly_breakdown'])
-            df['average'] = df['average'].round(2)
-            df['total'] = df['total'].round(2)
-            df.columns = ['Month', 'Receipt Count', 'Total Spent', 'Average per Receipt']
-            st.dataframe(df, use_container_width=True, hide_index=True)
-        else:
-            st.info("No monthly data available")
-    
-    with tab2:
-        top_merchants = analytics.get('top_merchants', {})
-        if top_merchants:
-            merchant_data = []
-            for merchant, amount in top_merchants.items():
-                receipt_count = sum(1 for r in receipts if r.merchant_name == merchant)
-                avg_amount = amount / receipt_count if receipt_count > 0 else 0
-                merchant_data.append({
-                    'Merchant': merchant,
-                    'Total Spent': f"${amount:.2f}",
-                    'Receipt Count': receipt_count,
-                    'Average per Visit': f"${avg_amount:.2f}"
-                })
-            
-            df = pd.DataFrame(merchant_data)
-            st.dataframe(df, use_container_width=True, hide_index=True)
-        else:
-            st.info("No merchant data available")
-    
-    with tab3:
-        # Category analysis
-        category_data = defaultdict(lambda: {'total': 0, 'count': 0})
-        
-        for receipt in receipts:
-            if receipt.total_amount:
-                category = receipt.category or 'Uncategorized'
-                category_data[category]['total'] += receipt.total_amount
-                category_data[category]['count'] += 1
-        
-        if category_data:
-            cat_list = []
-            for category, data in category_data.items():
-                avg_amount = data['total'] / data['count'] if data['count'] > 0 else 0
-                cat_list.append({
-                    'Category': category,
-                    'Total Spent': f"${data['total']:.2f}",
-                    'Receipt Count': data['count'],
-                    'Average per Receipt': f"${avg_amount:.2f}"
-                })
-            
-            df = pd.DataFrame(cat_list)
-            df = df.sort_values('Total Spent', ascending=False)
-            st.dataframe(df, use_container_width=True, hide_index=True)
-        else:
-            st.info("No category data available")
+        st.error(f"Error loading analytics: {str(e)}")
 
 if __name__ == "__main__":
     main()

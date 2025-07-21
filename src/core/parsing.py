@@ -1,297 +1,252 @@
 import re
-import logging
-from typing import Dict, Any, List, Optional, Tuple
-from datetime import datetime
+import pytesseract
+from PIL import Image
 import cv2
 import numpy as np
-import pytesseract
-import fitz  # PyMuPDF
-from pathlib import Path
-import io
-
-from .models import ReceiptItem
+from datetime import datetime
+from typing import Dict, List, Any, Optional
+import logging
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-class TextExtractor:
-    """Extracts and processes text from receipt images and PDFs"""
+class ReceiptParser:
+    """OCR-based receipt parser"""
     
     def __init__(self):
-        self.tesseract_config = '--oem 3 --psm 6 -c tessedit_char_whitelist=0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz.,/$-: '
+        """Initialize the parser"""
+        self.store_patterns = {
+            'walmart': r'walmart|wal-mart',
+            'target': r'target',
+            'costco': r'costco',
+            'kroger': r'kroger',
+            'safeway': r'safeway',
+            'whole foods': r'whole\s*foods',
+            'trader joe': r'trader\s*joe',
+            'cvs': r'cvs',
+            'walgreens': r'walgreens',
+            'home depot': r'home\s*depot',
+            'lowes': r'lowe\'?s',
+            'best buy': r'best\s*buy'
+        }
         
-        # Common patterns for receipt parsing
-        self.patterns = {
-            'total': [
-                r'total[:\s]*\$?(\d+\.?\d*)',
-                r'amount[:\s]*\$?(\d+\.?\d*)',
-                r'sum[:\s]*\$?(\d+\.?\d*)',
-                r'\$(\d+\.\d{2})\s*$'
-            ],
-            'date': [
-                r'(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})',
-                r'(\d{4}[/-]\d{1,2}[/-]\d{1,2})',
-                r'(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+\d{1,2},?\s+\d{4}',
-                r'\d{1,2}\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+\d{4}'
-            ],
-            'merchant': [
-                r'^([A-Z][A-Za-z\s&]+)(?=\n|\r)',
-                r'([A-Z][A-Za-z\s&]{3,})\s*(?:store|shop|market|restaurant|cafe)',
-            ],
-            'items': [
-                r'([A-Za-z][A-Za-z\s]+)\s+(\d+\.?\d*)\s*\$?(\d+\.\d{2})',
-                r'([A-Za-z][A-Za-z\s]+)\s+\$?(\d+\.\d{2})',
-            ]
+        self.category_keywords = {
+            'Grocery': ['grocery', 'food', 'produce', 'meat', 'dairy', 'bread', 'milk', 'eggs'],
+            'Restaurant': ['restaurant', 'cafe', 'diner', 'pizza', 'burger', 'coffee', 'bar'],
+            'Gas': ['gas', 'fuel', 'shell', 'exxon', 'bp', 'chevron', 'mobil'],
+            'Retail': ['store', 'shop', 'mall', 'outlet', 'department'],
+            'Pharmacy': ['pharmacy', 'drug', 'cvs', 'walgreens', 'rite aid'],
+            'Home': ['home depot', 'lowes', 'hardware', 'garden', 'improvement'],
+            'Electronics': ['best buy', 'electronics', 'computer', 'phone', 'tech'],
+            'Clothing': ['clothing', 'apparel', 'fashion', 'shoes', 'dress']
         }
     
-    def extract_from_file(self, file_path: str) -> Dict[str, Any]:
-        """Extract text and information from a file (image or PDF)"""
+    def parse_image(self, image: Image.Image) -> Dict[str, Any]:
+        """Parse receipt from image"""
         try:
-            file_path = Path(file_path)
+            # Preprocess image
+            processed_image = self._preprocess_image(image)
             
-            if not file_path.exists():
-                return {'success': False, 'error': 'File not found'}
+            # Extract text using OCR
+            text = pytesseract.image_to_string(processed_image, config='--psm 6')
             
-            # Determine file type and extract text
-            if file_path.suffix.lower() == '.pdf':
-                text = self._extract_from_pdf(file_path)
-            else:
-                text = self._extract_from_image(file_path)
+            logger.info(f"Extracted text: {text[:200]}...")
             
-            if not text.strip():
-                return {'success': False, 'error': 'No text could be extracted'}
+            # Parse the extracted text
+            parsed_data = self._parse_text(text)
             
-            # Parse extracted text
-            parsed_data = self._parse_receipt_text(text)
+            return parsed_data
             
+        except Exception as e:
+            logger.error(f"Error parsing image: {str(e)}")
             return {
-                'success': True,
-                'text': text,
-                **parsed_data
+                'store_name': 'Unknown',
+                'date': datetime.now(),
+                'total': 0.0,
+                'items': [],
+                'category': 'Other'
             }
-            
-        except Exception as e:
-            logger.error(f"Error extracting from file {file_path}: {e}")
-            return {'success': False, 'error': str(e)}
     
-    def _extract_from_image(self, image_path: Path) -> str:
-        """Extract text from image using OCR"""
-        try:
-            # Load and preprocess image
-            image = cv2.imread(str(image_path))
-            if image is None:
-                raise ValueError("Could not load image")
-            
-            processed_image = self.preprocess_image(image)
-            
-            # Extract text using Tesseract
-            text = pytesseract.image_to_string(processed_image, config=self.tesseract_config)
-            
-            return text.strip()
-            
-        except Exception as e:
-            logger.error(f"Error extracting text from image: {e}")
-            raise
-    
-    def _extract_from_pdf(self, pdf_path: Path) -> str:
-        """Extract text from PDF"""
-        try:
-            text = ""
-            doc = fitz.open(pdf_path)
-            
-            for page_num in range(doc.page_count):
-                page = doc[page_num]
-                
-                # Try text extraction first
-                page_text = page.get_text()
-                
-                if page_text.strip():
-                    text += page_text + "\n"
-                else:
-                    # If no text, try OCR on page image
-                    pix = page.get_pixmap()
-                    img_data = pix.tobytes("png")
-                    img = Image.open(io.BytesIO(img_data))
-                    
-                    # Convert PIL to OpenCV format
-                    img_cv = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
-                    processed_img = self.preprocess_image(img_cv)
-                    
-                    ocr_text = pytesseract.image_to_string(processed_img, config=self.tesseract_config)
-                    text += ocr_text + "\n"
-            
-            doc.close()
-            return text.strip()
-            
-        except Exception as e:
-            logger.error(f"Error extracting text from PDF: {e}")
-            raise
-    
-    def preprocess_image(self, image: np.ndarray) -> np.ndarray:
+    def _preprocess_image(self, image: Image.Image) -> Image.Image:
         """Preprocess image for better OCR results"""
         try:
-            # Convert to grayscale
-            if len(image.shape) == 3:
-                gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            # Convert PIL image to OpenCV format
+            img_array = np.array(image)
+            
+            # Convert to grayscale if needed
+            if len(img_array.shape) == 3:
+                gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
             else:
-                gray = image.copy()
+                gray = img_array
             
-            # Apply denoising
-            denoised = cv2.fastNlMeansDenoising(gray)
+            # Apply image processing techniques
+            # 1. Noise reduction
+            denoised = cv2.medianBlur(gray, 3)
             
-            # Apply adaptive thresholding
-            thresh = cv2.adaptiveThreshold(
-                denoised, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2
-            )
+            # 2. Contrast enhancement
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+            enhanced = clahe.apply(denoised)
             
-            # Apply morphological operations to clean up
-            kernel = np.ones((1, 1), np.uint8)
-            cleaned = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+            # 3. Thresholding
+            _, thresh = cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
             
-            # Resize if image is too small
-            height, width = cleaned.shape
-            if height < 300 or width < 300:
-                scale_factor = max(300 / height, 300 / width)
-                new_width = int(width * scale_factor)
-                new_height = int(height * scale_factor)
-                cleaned = cv2.resize(cleaned, (new_width, new_height), interpolation=cv2.INTER_CUBIC)
+            # Convert back to PIL Image
+            processed_image = Image.fromarray(thresh)
             
-            return cleaned
+            return processed_image
             
         except Exception as e:
-            logger.error(f"Error preprocessing image: {e}")
+            logger.warning(f"Image preprocessing failed: {str(e)}, using original image")
             return image
     
-    def _parse_receipt_text(self, text: str) -> Dict[str, Any]:
-        """Parse receipt text to extract structured information"""
-        result = {
-            'total_amount': None,
-            'merchant_name': None,
-            'date': None,
-            'items': []
+    def _parse_text(self, text: str) -> Dict[str, Any]:
+        """Parse extracted text to extract receipt information"""
+        lines = [line.strip() for line in text.split('\n') if line.strip()]
+        
+        parsed_data = {
+            'store_name': self._extract_store_name(text),
+            'date': self._extract_date(text),
+            'total': self._extract_total(text),
+            'items': self._extract_items(lines),
+            'category': 'Other'
         }
         
-        try:
-            # Clean text
-            lines = [line.strip() for line in text.split('\n') if line.strip()]
-            text_lower = text.lower()
-            
-            # Extract total amount
-            result['total_amount'] = self._extract_total(text_lower)
-            
-            # Extract merchant name
-            result['merchant_name'] = self._extract_merchant(lines)
-            
-            # Extract date
-            result['date'] = self._extract_date(text)
-            
-            # Extract items
-            result['items'] = self._extract_items(lines)
-            
-            return result
-            
-        except Exception as e:
-            logger.error(f"Error parsing receipt text: {e}")
-            return result
+        # Determine category based on store name
+        parsed_data['category'] = self._determine_category(parsed_data['store_name'])
+        
+        return parsed_data
     
-    def _extract_total(self, text: str) -> Optional[float]:
-        """Extract total amount from text"""
-        for pattern in self.patterns['total']:
-            matches = re.findall(pattern, text, re.IGNORECASE)
+    def _extract_store_name(self, text: str) -> str:
+        """Extract store name from text"""
+        text_lower = text.lower()
+        
+        # Check for known store patterns
+        for store, pattern in self.store_patterns.items():
+            if re.search(pattern, text_lower):
+                return store.title()
+        
+        # Try to extract from first few lines
+        lines = text.split('\n')[:5]
+        for line in lines:
+            line = line.strip()
+            if len(line) > 3 and not re.search(r'\d', line):
+                # Likely a store name if it's text without numbers
+                return line.title()
+        
+        return 'Unknown Store'
+    
+    def _extract_date(self, text: str) -> datetime:
+        """Extract date from text"""
+        # Common date patterns
+        date_patterns = [
+            r'(\d{1,2})/(\d{1,2})/(\d{2,4})',  # MM/DD/YYYY or MM/DD/YY
+            r'(\d{1,2})-(\d{1,2})-(\d{2,4})',  # MM-DD-YYYY or MM-DD-YY
+            r'(\d{2,4})/(\d{1,2})/(\d{1,2})',  # YYYY/MM/DD
+            r'(\d{2,4})-(\d{1,2})-(\d{1,2})',  # YYYY-MM-DD
+        ]
+        
+        for pattern in date_patterns:
+            matches = re.findall(pattern, text)
             if matches:
                 try:
-                    # Get the last match (usually the final total)
-                    amount_str = matches[-1].replace('$', '').replace(',', '')
-                    return float(amount_str)
+                    match = matches[0]
+                    # Try different date formats
+                    if len(match[2]) == 4:  # YYYY format
+                        if int(match[2]) > 2000:  # Likely YYYY/MM/DD
+                            date = datetime(int(match[2]), int(match[1]), int(match[0]))
+                        else:  # MM/DD/YYYY
+                            date = datetime(int(match[2]), int(match[0]), int(match[1]))
+                    else:  # YY format
+                        year = int(match[2])
+                        if year < 50:
+                            year += 2000
+                        else:
+                            year += 1900
+                        date = datetime(year, int(match[0]), int(match[1]))
+                    
+                    return date
                 except (ValueError, IndexError):
                     continue
-        return None
+        
+        # If no date found, return current date
+        return datetime.now()
     
-    def _extract_merchant(self, lines: List[str]) -> Optional[str]:
-        """Extract merchant name from text lines"""
-        # Usually the merchant name is in the first few lines
-        for line in lines[:5]:
-            line = line.strip()
-            if len(line) > 3 and not re.match(r'^\d', line):
-                # Clean up common receipt artifacts
-                cleaned = re.sub(r'[^\w\s&-]', '', line)
-                if len(cleaned) > 3:
-                    return cleaned.title()
-        return None
-    
-    def _extract_date(self, text: str) -> Optional[datetime]:
-        """Extract date from text"""
-        for pattern in self.patterns['date']:
-            matches = re.findall(pattern, text, re.IGNORECASE)
+    def _extract_total(self, text: str) -> float:
+        """Extract total amount from text"""
+        # Look for total patterns
+        total_patterns = [
+            r'total[:\s]*\$?(\d+\.?\d*)',
+            r'amount[:\s]*\$?(\d+\.?\d*)',
+            r'balance[:\s]*\$?(\d+\.?\d*)',
+            r'\$(\d+\.\d{2})\s*$',  # Dollar amount at end of line
+        ]
+        
+        text_lower = text.lower()
+        
+        for pattern in total_patterns:
+            matches = re.findall(pattern, text_lower, re.MULTILINE)
             if matches:
-                for match in matches:
-                    try:
-                        # Try different date formats
-                        date_str = match if isinstance(match, str) else match[0]
-                        
-                        # Common date formats
-                        formats = [
-                            '%m/%d/%Y', '%m-%d-%Y', '%m/%d/%y', '%m-%d-%y',
-                            '%Y/%m/%d', '%Y-%m-%d',
-                            '%d/%m/%Y', '%d-%m-%Y',
-                            '%B %d, %Y', '%b %d, %Y',
-                            '%d %B %Y', '%d %b %Y'
-                        ]
-                        
-                        for fmt in formats:
-                            try:
-                                return datetime.strptime(date_str, fmt)
-                            except ValueError:
-                                continue
-                                
-                    except Exception:
-                        continue
-        return None
+                try:
+                    # Get the largest amount (likely the total)
+                    amounts = [float(match) for match in matches]
+                    return max(amounts)
+                except ValueError:
+                    continue
+        
+        # Look for any dollar amounts and take the largest
+        dollar_amounts = re.findall(r'\$(\d+\.\d{2})', text)
+        if dollar_amounts:
+            try:
+                amounts = [float(amount) for amount in dollar_amounts]
+                return max(amounts)
+            except ValueError:
+                pass
+        
+        return 0.0
     
-    def _extract_items(self, lines: List[str]) -> List[ReceiptItem]:
-        """Extract individual items from receipt lines"""
+    def _extract_items(self, lines: List[str]) -> List[Dict[str, Any]]:
+        """Extract items from receipt lines"""
         items = []
         
         for line in lines:
-            line = line.strip()
-            if not line or len(line) < 3:
+            # Skip lines that are likely headers, totals, or store info
+            if any(keyword in line.lower() for keyword in ['total', 'subtotal', 'tax', 'change', 'cash', 'card']):
                 continue
             
-            # Look for patterns like "Item Name 1.99" or "Item Name 2 $3.98"
-            patterns = [
-                r'^([A-Za-z][A-Za-z\s]+?)\s+(\d+)\s*\$?(\d+\.\d{2})$',  # Item Qty Price
-                r'^([A-Za-z][A-Za-z\s]+?)\s+\$?(\d+\.\d{2})$',  # Item Price
-                r'^([A-Za-z][A-Za-z\s]+?)\s+(\d+\.\d{2})\s*$',  # Item Price (no $)
-            ]
-            
-            for pattern in patterns:
-                match = re.match(pattern, line)
-                if match:
-                    groups = match.groups()
-                    
-                    if len(groups) == 3:  # Item, Qty, Price
-                        name, qty, price = groups
-                        try:
-                            items.append(ReceiptItem(
-                                name=name.strip().title(),
-                                quantity=int(qty),
-                                price=float(price)
-                            ))
-                            break
-                        except ValueError:
-                            continue
-                    
-                    elif len(groups) == 2:  # Item, Price
-                        name, price = groups
-                        try:
-                            items.append(ReceiptItem(
-                                name=name.strip().title(),
-                                quantity=1,
-                                price=float(price)
-                            ))
-                            break
-                        except ValueError:
-                            continue
+            # Look for lines with prices
+            price_match = re.search(r'\$?(\d+\.\d{2})', line)
+            if price_match:
+                price = float(price_match.group(1))
+                
+                # Extract item name (text before the price)
+                item_name = re.sub(r'\$?\d+\.\d{2}.*', '', line).strip()
+                
+                # Clean up item name
+                item_name = re.sub(r'^\d+\s*', '', item_name)  # Remove leading numbers
+                item_name = item_name.strip()
+                
+                if item_name and len(item_name) > 2:
+                    items.append({
+                        'name': item_name,
+                        'price': price,
+                        'quantity': 1,
+                        'category': 'Other'
+                    })
         
         return items
+    
+    def _determine_category(self, store_name: str) -> str:
+        """Determine receipt category based on store name"""
+        store_lower = store_name.lower()
+        
+        for category, keywords in self.category_keywords.items():
+            for keyword in keywords:
+                if keyword in store_lower:
+                    return category
+        
+        return 'Other'
+    
+    def parse_text_directly(self, text: str) -> Dict[str, Any]:
+        """Parse receipt from text directly (for testing)"""
+        return self._parse_text(text)
