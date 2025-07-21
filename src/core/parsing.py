@@ -1,39 +1,58 @@
 """
-File processing and text extraction module.
-Implements hybrid OCR approach with image preprocessing and intelligent text extraction.
+File Processing and OCR Module - Advanced Text Extraction
+
+This module implements comprehensive file processing capabilities with hybrid OCR
+approach using PyMuPDF for text-based PDFs and Tesseract for images. Includes
+advanced image preprocessing, pattern recognition, and data extraction algorithms.
+
+Features:
+- Multi-format file support (PDF, images, text)
+- Advanced image preprocessing pipeline
+- Hybrid OCR with fallback mechanisms
+- Intelligent data extraction using regex patterns
+- Confidence scoring and validation
+- Error handling and recovery
+
+Author: Receipt Processing Team
+Version: 1.0.0
 """
 
+import os
+import re
+import tempfile
+import logging
+from datetime import datetime
+from decimal import Decimal, InvalidOperation
+from pathlib import Path
+from typing import Tuple, Optional, List, Dict, Any
 import cv2
 import numpy as np
 import pytesseract
 import fitz  # PyMuPDF
-import re
-import logging
-from datetime import datetime, date
-from decimal import Decimal, InvalidOperation
-from pathlib import Path
-from typing import Optional, Tuple, List, Dict, Any
-from PIL import Image
-import io
-import time
+from PIL import Image, ImageEnhance
+from dateutil import parser as date_parser
 
-from .models import Receipt, ProcessingResult, CategoryEnum, CurrencyEnum
+from .models import Receipt, ProcessingResult, CategoryEnum, CurrencyEnum, classify_category, detect_currency
 
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 class TextExtractor:
     """
-    Advanced text extraction with OCR and PDF parsing capabilities.
+    Advanced text extraction engine with hybrid OCR capabilities.
     
-    Implements intelligent preprocessing, multi-format support,
-    and robust data extraction algorithms.
+    Implements intelligent file processing with automatic format detection,
+    image preprocessing, and optimized text extraction for maximum accuracy.
     """
     
     def __init__(self):
-        """Initialize text extractor with configuration."""
-        self.logger = logging.getLogger(__name__)
+        """Initialize the text extractor with default configurations."""
+        self.supported_formats = {'.pdf', '.jpg', '.jpeg', '.png', '.tiff', '.bmp', '.txt'}
+        self.max_file_size = 10 * 1024 * 1024  # 10MB
         
         # OCR configuration
-        self.tesseract_config = r'--oem 3 --psm 6 -c tessedit_char_whitelist=0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz.,/$-: '
+        self.tesseract_config = '--oem 3 --psm 6 -c tessedit_char_whitelist=0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz.,/$€£¥-: '
         
         # Regex patterns for data extraction
         self.amount_patterns = [
@@ -45,31 +64,15 @@ class TextExtractor:
         ]
         
         self.date_patterns = [
-            r'(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})',  # MM/DD/YYYY, MM-DD-YY
-            r'(\d{4}[/-]\d{1,2}[/-]\d{1,2})',    # YYYY/MM/DD
-            r'(\w{3,9}\s+\d{1,2},?\s+\d{4})',    # January 1, 2024
-            r'(\d{1,2}\s+\w{3,9}\s+\d{4})',      # 1 January 2024
+            r'\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b',  # MM/DD/YYYY, MM-DD-YY
+            r'\b(\d{4}[/-]\d{1,2}[/-]\d{1,2})\b',    # YYYY/MM/DD
+            r'\b([A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4})\b',  # Month DD, YYYY
+            r'\b(\d{1,2}\s+[A-Za-z]{3,9}\s+\d{4})\b',    # DD Month YYYY
         ]
         
-        # Currency symbols and patterns
-        self.currency_patterns = {
-            CurrencyEnum.USD: [r'\$', r'USD', r'US\$'],
-            CurrencyEnum.EUR: [r'€', r'EUR', r'EURO'],
-            CurrencyEnum.GBP: [r'£', r'GBP', r'POUND'],
-            CurrencyEnum.CAD: [r'CAD', r'C\$'],
-            CurrencyEnum.AUD: [r'AUD', r'A\$'],
-        }
-        
-        # Category keywords for automatic classification
-        self.category_keywords = {
-            CategoryEnum.FOOD: ['restaurant', 'cafe', 'diner', 'bistro', 'grill', 'pizza', 'burger', 'food'],
-            CategoryEnum.GROCERIES: ['grocery', 'supermarket', 'market', 'walmart', 'target', 'costco', 'safeway'],
-            CategoryEnum.TRANSPORTATION: ['gas', 'fuel', 'uber', 'lyft', 'taxi', 'parking', 'metro', 'bus'],
-            CategoryEnum.ENTERTAINMENT: ['movie', 'theater', 'cinema', 'concert', 'show', 'entertainment'],
-            CategoryEnum.SHOPPING: ['store', 'shop', 'mall', 'retail', 'amazon', 'ebay'],
-            CategoryEnum.UTILITIES: ['electric', 'water', 'gas', 'internet', 'phone', 'utility'],
-            CategoryEnum.HEALTHCARE: ['pharmacy', 'hospital', 'clinic', 'doctor', 'medical', 'health'],
-            CategoryEnum.BUSINESS: ['office', 'supplies', 'business', 'professional', 'service'],
+        self.vendor_stop_words = {
+            'receipt', 'invoice', 'bill', 'total', 'amount', 'date', 'time',
+            'thank', 'you', 'visit', 'again', 'store', 'location', 'address'
         }
     
     def process_file(self, file_path: str, filename: str) -> ProcessingResult:
@@ -81,21 +84,27 @@ class TextExtractor:
             filename: Original filename
             
         Returns:
-            ProcessingResult with extracted receipt or error information
+            ProcessingResult with extracted receipt data or error information
         """
-        start_time = time.time()
+        start_time = datetime.now()
         
         try:
-            file_path = Path(file_path)
-            file_extension = file_path.suffix.lower()
+            # Validate file
+            if not self._validate_file(file_path, filename):
+                return ProcessingResult(
+                    success=False,
+                    error_message="File validation failed"
+                )
             
-            self.logger.info(f"Processing file: {filename} ({file_extension})")
+            # Extract text based on file type
+            file_extension = Path(filename).suffix.lower()
             
-            # Route to appropriate processor
             if file_extension == '.pdf':
                 text, confidence = self._process_pdf(file_path)
             elif file_extension in ['.jpg', '.jpeg', '.png', '.tiff', '.bmp']:
                 text, confidence = self._process_image(file_path)
+            elif file_extension == '.txt':
+                text, confidence = self._process_text_file(file_path)
             else:
                 return ProcessingResult(
                     success=False,
@@ -108,242 +117,291 @@ class TextExtractor:
                     error_message="No text could be extracted from the file"
                 )
             
-            # Extract structured data from text
-            receipt_data = self._extract_receipt_data(text, filename)
-            receipt_data.extracted_text = text
-            receipt_data.confidence_score = confidence
+            # Extract structured data
+            receipt = self._extract_receipt_data(text, filename)
+            receipt.confidence_score = confidence
+            receipt.extracted_text = text
             
-            processing_time = time.time() - start_time
+            processing_time = (datetime.now() - start_time).total_seconds()
             
             return ProcessingResult(
                 success=True,
-                receipt=receipt_data,
-                processing_time=processing_time,
-                warnings=self._generate_warnings(receipt_data, confidence)
+                receipt=receipt,
+                processing_time=processing_time
             )
             
         except Exception as e:
-            self.logger.error(f"Error processing file {filename}: {e}")
+            logger.error(f"Processing failed for {filename}: {e}")
             return ProcessingResult(
                 success=False,
-                error_message=f"Processing failed: {str(e)}",
-                processing_time=time.time() - start_time
+                error_message=f"Processing error: {str(e)}"
             )
     
-    def _process_pdf(self, file_path: Path) -> Tuple[str, float]:
-        """
-        Extract text from PDF using PyMuPDF with OCR fallback.
-        
-        Args:
-            file_path: Path to PDF file
+    def _validate_file(self, file_path: str, filename: str) -> bool:
+        """Validate file format and size."""
+        try:
+            # Check file extension
+            file_extension = Path(filename).suffix.lower()
+            if file_extension not in self.supported_formats:
+                logger.error(f"Unsupported file format: {file_extension}")
+                return False
             
-        Returns:
-            Tuple of (extracted_text, confidence_score)
+            # Check file size
+            file_size = os.path.getsize(file_path)
+            if file_size > self.max_file_size:
+                logger.error(f"File too large: {file_size} bytes")
+                return False
+            
+            # Check if file exists and is readable
+            if not os.path.isfile(file_path):
+                logger.error(f"File not found: {file_path}")
+                return False
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"File validation error: {e}")
+            return False
+    
+    def _process_pdf(self, file_path: str) -> Tuple[str, float]:
+        """
+        Process PDF file with hybrid text extraction.
+        
+        First attempts direct text extraction, falls back to OCR if needed.
         """
         try:
             doc = fitz.open(file_path)
             text = ""
-            confidence = 100.0  # High confidence for direct text extraction
+            confidence = 1.0  # High confidence for direct text extraction
             
+            # Try direct text extraction first
             for page_num in range(len(doc)):
                 page = doc.load_page(page_num)
                 page_text = page.get_text()
-                
-                if page_text.strip():
-                    # Direct text extraction successful
-                    text += page_text + "\n"
-                else:
-                    # Fallback to OCR for scanned PDFs
-                    self.logger.info(f"Using OCR for PDF page {page_num + 1}")
-                    pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))  # 2x zoom for better OCR
-                    img_data = pix.tobytes("png")
-                    
-                    # Convert to PIL Image for processing
-                    pil_image = Image.open(io.BytesIO(img_data))
-                    
-                    # Preprocess and OCR
-                    processed_image = self._preprocess_image(np.array(pil_image))
-                    ocr_text, ocr_confidence = self._perform_ocr(processed_image)
-                    
-                    text += ocr_text + "\n"
-                    confidence = min(confidence, ocr_confidence)  # Use lowest confidence
+                text += page_text + "\n"
             
             doc.close()
-            return text.strip(), confidence
             
-        except Exception as e:
-            self.logger.error(f"PDF processing failed: {e}")
-            raise
-    
-    def _process_image(self, file_path: Path) -> Tuple[str, float]:
-        """
-        Extract text from image using OCR with preprocessing.
-        
-        Args:
-            file_path: Path to image file
-            
-        Returns:
-            Tuple of (extracted_text, confidence_score)
-        """
-        try:
-            # Load image
-            image = cv2.imread(str(file_path))
-            if image is None:
-                raise ValueError("Could not load image file")
-            
-            # Preprocess image for better OCR
-            processed_image = self._preprocess_image(image)
-            
-            # Perform OCR
-            text, confidence = self._perform_ocr(processed_image)
+            # If direct extraction yields little text, try OCR
+            if len(text.strip()) < 50:
+                logger.info("Direct PDF text extraction yielded little text, trying OCR")
+                text, confidence = self._pdf_to_ocr(file_path)
             
             return text, confidence
             
         except Exception as e:
-            self.logger.error(f"Image processing failed: {e}")
-            raise
+            logger.error(f"PDF processing error: {e}")
+            # Fallback to OCR
+            return self._pdf_to_ocr(file_path)
     
-    def _preprocess_image(self, image: np.ndarray) -> np.ndarray:
-        """
-        Advanced image preprocessing for optimal OCR results.
-        
-        Args:
-            image: Input image as numpy array
+    def _pdf_to_ocr(self, file_path: str) -> Tuple[str, float]:
+        """Convert PDF to images and perform OCR."""
+        try:
+            doc = fitz.open(file_path)
+            text = ""
+            confidences = []
             
-        Returns:
-            Preprocessed image
+            for page_num in range(len(doc)):
+                page = doc.load_page(page_num)
+                
+                # Convert page to image
+                mat = fitz.Matrix(2, 2)  # 2x zoom for better quality
+                pix = page.get_pixmap(matrix=mat)
+                img_data = pix.tobytes("png")
+                
+                # Save to temporary file for OCR
+                with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as temp_file:
+                    temp_file.write(img_data)
+                    temp_path = temp_file.name
+                
+                try:
+                    # Perform OCR on the image
+                    page_text, page_confidence = self._process_image(temp_path)
+                    text += page_text + "\n"
+                    confidences.append(page_confidence)
+                finally:
+                    os.unlink(temp_path)
+            
+            doc.close()
+            
+            # Calculate average confidence
+            avg_confidence = sum(confidences) / len(confidences) if confidences else 0.0
+            return text, avg_confidence
+            
+        except Exception as e:
+            logger.error(f"PDF OCR processing error: {e}")
+            return "", 0.0
+    
+    def _process_image(self, file_path: str) -> Tuple[str, float]:
+        """
+        Process image file with advanced preprocessing and OCR.
+        
+        Applies image enhancement techniques for optimal OCR accuracy.
         """
         try:
-            # Convert to grayscale
-            if len(image.shape) == 3:
-                gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-            else:
-                gray = image.copy()
+            # Load and preprocess image
+            processed_image = self._preprocess_image(file_path)
             
-            # Resize if image is too small
-            height, width = gray.shape
-            if height < 300 or width < 300:
-                scale_factor = max(300 / height, 300 / width)
-                new_width = int(width * scale_factor)
-                new_height = int(height * scale_factor)
-                gray = cv2.resize(gray, (new_width, new_height), interpolation=cv2.INTER_CUBIC)
-            
-            # Noise reduction
-            denoised = cv2.medianBlur(gray, 3)
-            
-            # Enhance contrast using CLAHE
-            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-            enhanced = clahe.apply(denoised)
-            
-            # Adaptive thresholding for binarization
-            binary = cv2.adaptiveThreshold(
-                enhanced, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2
+            # Perform OCR with confidence scoring
+            ocr_data = pytesseract.image_to_data(
+                processed_image,
+                config=self.tesseract_config,
+                output_type=pytesseract.Output.DICT
             )
             
-            # Morphological operations to clean up
-            kernel = np.ones((1, 1), np.uint8)
-            cleaned = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
-            
-            # Perspective correction (basic skew correction)
-            cleaned = self._correct_skew(cleaned)
-            
-            return cleaned
-            
-        except Exception as e:
-            self.logger.error(f"Image preprocessing failed: {e}")
-            return image  # Return original if preprocessing fails
-    
-    def _correct_skew(self, image: np.ndarray) -> np.ndarray:
-        """
-        Correct image skew using Hough line detection.
-        
-        Args:
-            image: Binary image
-            
-        Returns:
-            Skew-corrected image
-        """
-        try:
-            # Detect lines using Hough transform
-            edges = cv2.Canny(image, 50, 150, apertureSize=3)
-            lines = cv2.HoughLines(edges, 1, np.pi / 180, threshold=100)
-            
-            if lines is not None and len(lines) > 0:
-                # Calculate average angle
-                angles = []
-                for rho, theta in lines[:10]:  # Use first 10 lines
-                    angle = theta * 180 / np.pi - 90
-                    angles.append(angle)
-                
-                if angles:
-                    median_angle = np.median(angles)
-                    
-                    # Only correct if skew is significant (> 1 degree)
-                    if abs(median_angle) > 1:
-                        height, width = image.shape
-                        center = (width // 2, height // 2)
-                        rotation_matrix = cv2.getRotationMatrix2D(center, median_angle, 1.0)
-                        corrected = cv2.warpAffine(image, rotation_matrix, (width, height), 
-                                                 flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
-                        return corrected
-            
-            return image
-            
-        except Exception as e:
-            self.logger.warning(f"Skew correction failed: {e}")
-            return image
-    
-    def _perform_ocr(self, image: np.ndarray) -> Tuple[str, float]:
-        """
-        Perform OCR on preprocessed image.
-        
-        Args:
-            image: Preprocessed image
-            
-        Returns:
-            Tuple of (extracted_text, confidence_score)
-        """
-        try:
-            # Get OCR data with confidence scores
-            data = pytesseract.image_to_data(image, config=self.tesseract_config, output_type=pytesseract.Output.DICT)
-            
-            # Extract text and calculate average confidence
+            # Extract text and calculate confidence
             text_parts = []
             confidences = []
             
-            for i, word in enumerate(data['text']):
+            for i, word in enumerate(ocr_data['text']):
                 if word.strip():
                     text_parts.append(word)
-                    conf = data['conf'][i]
-                    if conf > 0:  # Valid confidence score
+                    conf = int(ocr_data['conf'][i])
+                    if conf > 0:  # Only include positive confidence scores
                         confidences.append(conf)
             
             text = ' '.join(text_parts)
-            avg_confidence = np.mean(confidences) if confidences else 0.0
+            avg_confidence = sum(confidences) / len(confidences) / 100.0 if confidences else 0.0
             
             return text, avg_confidence
             
         except Exception as e:
-            self.logger.error(f"OCR failed: {e}")
-            # Fallback to simple OCR
+            logger.error(f"Image processing error: {e}")
+            return "", 0.0
+    
+    def _preprocess_image(self, file_path: str) -> np.ndarray:
+        """
+        Advanced image preprocessing pipeline for optimal OCR.
+        
+        Applies perspective correction, noise removal, and enhancement techniques.
+        """
+        try:
+            # Load image
+            image = cv2.imread(file_path)
+            if image is None:
+                raise ValueError("Could not load image")
+            
+            # Convert to grayscale
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            
+            # Apply perspective correction if needed
+            corrected = self._correct_perspective(gray)
+            
+            # Noise removal
+            denoised = cv2.medianBlur(corrected, 3)
+            
+            # Adaptive thresholding for better text contrast
+            binary = cv2.adaptiveThreshold(
+                denoised, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2
+            )
+            
+            # Morphological operations to clean up text
+            kernel = np.ones((1, 1), np.uint8)
+            cleaned = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+            
+            # Enhance contrast
+            enhanced = cv2.convertScaleAbs(cleaned, alpha=1.2, beta=10)
+            
+            return enhanced
+            
+        except Exception as e:
+            logger.error(f"Image preprocessing error: {e}")
+            # Return original image if preprocessing fails
+            return cv2.imread(file_path, cv2.IMREAD_GRAYSCALE)
+    
+    def _correct_perspective(self, image: np.ndarray) -> np.ndarray:
+        """
+        Detect and correct perspective distortion in receipt images.
+        
+        Uses edge detection and contour analysis to find receipt boundaries.
+        """
+        try:
+            # Edge detection
+            edges = cv2.Canny(image, 50, 150, apertureSize=3)
+            
+            # Find contours
+            contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            
+            # Find the largest rectangular contour (likely the receipt)
+            for contour in sorted(contours, key=cv2.contourArea, reverse=True):
+                # Approximate contour to polygon
+                epsilon = 0.02 * cv2.arcLength(contour, True)
+                approx = cv2.approxPolyDP(contour, epsilon, True)
+                
+                # If we found a quadrilateral, apply perspective correction
+                if len(approx) == 4:
+                    return self._apply_perspective_transform(image, approx)
+            
+            # If no quadrilateral found, return original
+            return image
+            
+        except Exception as e:
+            logger.error(f"Perspective correction error: {e}")
+            return image
+    
+    def _apply_perspective_transform(self, image: np.ndarray, corners: np.ndarray) -> np.ndarray:
+        """Apply perspective transformation to correct skewed receipts."""
+        try:
+            # Order corners: top-left, top-right, bottom-right, bottom-left
+            corners = corners.reshape(4, 2)
+            
+            # Calculate dimensions of the corrected image
+            width = max(
+                np.linalg.norm(corners[0] - corners[1]),
+                np.linalg.norm(corners[2] - corners[3])
+            )
+            height = max(
+                np.linalg.norm(corners[0] - corners[3]),
+                np.linalg.norm(corners[1] - corners[2])
+            )
+            
+            # Define destination points
+            dst_corners = np.array([
+                [0, 0],
+                [width - 1, 0],
+                [width - 1, height - 1],
+                [0, height - 1]
+            ], dtype=np.float32)
+            
+            # Calculate perspective transform matrix
+            matrix = cv2.getPerspectiveTransform(corners.astype(np.float32), dst_corners)
+            
+            # Apply transformation
+            corrected = cv2.warpPerspective(image, matrix, (int(width), int(height)))
+            
+            return corrected
+            
+        except Exception as e:
+            logger.error(f"Perspective transform error: {e}")
+            return image
+    
+    def _process_text_file(self, file_path: str) -> Tuple[str, float]:
+        """Process plain text file."""
+        try:
+            with open(file_path, 'r', encoding='utf-8') as file:
+                text = file.read()
+            return text, 1.0  # High confidence for direct text
+            
+        except UnicodeDecodeError:
+            # Try with different encoding
             try:
-                text = pytesseract.image_to_string(image, config=self.tesseract_config)
-                return text, 50.0  # Default confidence for fallback
-            except:
+                with open(file_path, 'r', encoding='latin-1') as file:
+                    text = file.read()
+                return text, 0.9  # Slightly lower confidence
+            except Exception as e:
+                logger.error(f"Text file processing error: {e}")
                 return "", 0.0
+        except Exception as e:
+            logger.error(f"Text file processing error: {e}")
+            return "", 0.0
     
     def _extract_receipt_data(self, text: str, filename: str) -> Receipt:
         """
-        Extract structured receipt data from raw text.
+        Extract structured receipt data from text using pattern matching.
         
-        Args:
-            text: Raw extracted text
-            filename: Original filename
-            
-        Returns:
-            Receipt object with extracted data
+        Uses regex patterns and heuristics to identify vendor, date, amount, and category.
         """
-        # Extract vendor (heuristic: first meaningful line)
+        # Extract vendor (usually in the first few lines)
         vendor = self._extract_vendor(text)
         
         # Extract transaction date
@@ -352,11 +410,11 @@ class TextExtractor:
         # Extract amount
         amount = self._extract_amount(text)
         
-        # Detect currency
-        currency = self._detect_currency(text)
-        
         # Classify category
-        category = self._classify_category(text, vendor)
+        category = classify_category(text, vendor)
+        
+        # Detect currency
+        currency = detect_currency(text)
         
         return Receipt(
             vendor=vendor,
@@ -365,153 +423,99 @@ class TextExtractor:
             category=category,
             currency=currency,
             source_file=filename,
-            extracted_text="",  # Will be set by caller
+            extracted_text=text,
             confidence_score=0.0  # Will be set by caller
         )
     
     def _extract_vendor(self, text: str) -> str:
-        """Extract vendor name from text using heuristics."""
+        """
+        Extract vendor name using heuristic analysis.
+        
+        Looks for vendor name in the first few lines, filtering out common receipt terms.
+        """
         lines = [line.strip() for line in text.split('\n') if line.strip()]
         
         if not lines:
             return "Unknown Vendor"
         
-        # Look for the first substantial line (likely vendor name)
-        for line in lines[:5]:  # Check first 5 lines
-            # Skip lines that look like addresses, dates, or amounts
-            if (len(line) > 3 and 
-                not re.search(r'\d{1,2}[/-]\d{1,2}[/-]\d{2,4}', line) and
-                not re.search(r'\$\d+', line) and
-                not re.search(r'^\d+\s+\w+\s+(st|ave|rd|blvd|street|avenue|road|boulevard)', line, re.I)):
-                
-                # Clean up the vendor name
-                vendor = re.sub(r'[^\w\s\-&.,]', '', line)
-                vendor = re.sub(r'\s+', ' ', vendor).strip()
-                
-                if len(vendor) >= 2:
-                    return vendor[:200]  # Limit length
+        # Check first few lines for vendor name
+        for line in lines[:5]:
+            # Clean the line
+            cleaned_line = re.sub(r'[^\w\s&\'-]', ' ', line)
+            words = cleaned_line.lower().split()
+            
+            # Filter out stop words and short words
+            filtered_words = [
+                word for word in words 
+                if len(word) > 2 and word not in self.vendor_stop_words
+            ]
+            
+            # If we have meaningful words, this might be the vendor
+            if filtered_words and len(' '.join(filtered_words)) > 3:
+                vendor_name = ' '.join(word.title() for word in filtered_words)
+                if len(vendor_name) <= 200:  # Respect max length
+                    return vendor_name
         
-        # Fallback to first line
-        return lines[0][:200] if lines else "Unknown Vendor"
+        # Fallback: use first non-empty line
+        return lines[0][:200] if lines[0] else "Unknown Vendor"
     
-    def _extract_date(self, text: str) -> date:
-        """Extract transaction date from text."""
+    def _extract_date(self, text: str) -> datetime:
+        """
+        Extract transaction date using multiple pattern matching strategies.
+        
+        Tries various date formats and returns the most likely transaction date.
+        """
+        dates_found = []
+        
+        # Try each date pattern
         for pattern in self.date_patterns:
             matches = re.findall(pattern, text, re.IGNORECASE)
             for match in matches:
                 try:
-                    # Try different date parsing approaches
-                    parsed_date = self._parse_date_string(match)
-                    if parsed_date:
-                        return parsed_date
-                except:
+                    # Parse date using dateutil for flexibility
+                    parsed_date = date_parser.parse(match, fuzzy=True)
+                    
+                    # Validate date is reasonable (not in future, not too old)
+                    if parsed_date <= datetime.now() and parsed_date.year >= 2000:
+                        dates_found.append(parsed_date)
+                        
+                except (ValueError, TypeError):
                     continue
         
-        # Fallback to today's date
-        return date.today()
-    
-    def _parse_date_string(self, date_str: str) -> Optional[date]:
-        """Parse various date string formats."""
-        from dateutil import parser
-        
-        try:
-            # Use dateutil parser for flexible date parsing
-            parsed = parser.parse(date_str, fuzzy=True)
-            parsed_date = parsed.date()
-            
-            # Validate date is reasonable (not in future, not too old)
-            today = date.today()
-            if parsed_date <= today and parsed_date.year >= 1990:
-                return parsed_date
-                
-        except:
-            pass
-        
-        return None
+        # Return the most recent valid date, or current date if none found
+        if dates_found:
+            return max(dates_found)
+        else:
+            logger.warning("No valid date found in text, using current date")
+            return datetime.now()
     
     def _extract_amount(self, text: str) -> Decimal:
-        """Extract transaction amount from text."""
-        amounts = []
+        """
+        Extract transaction amount using pattern matching and validation.
         
+        Looks for monetary amounts and returns the most likely total amount.
+        """
+        amounts_found = []
+        
+        # Try each amount pattern
         for pattern in self.amount_patterns:
             matches = re.findall(pattern, text, re.IGNORECASE)
             for match in matches:
                 try:
-                    # Clean and convert amount
+                    # Clean the amount string
                     amount_str = match.replace(',', '').replace('$', '').strip()
                     amount = Decimal(amount_str)
                     
-                    # Filter reasonable amounts (between $0.01 and $99,999.99)
-                    if Decimal('0.01') <= amount <= Decimal('99999.99'):
-                        amounts.append(amount)
+                    # Validate amount is reasonable
+                    if Decimal('0.01') <= amount <= Decimal('10000.00'):
+                        amounts_found.append(amount)
                         
                 except (InvalidOperation, ValueError):
                     continue
         
-        if amounts:
-            # Return the largest amount found (likely the total)
-            return max(amounts)
-        
-        # Fallback: look for any decimal number
-        decimal_matches = re.findall(r'\b(\d+\.\d{2})\b', text)
-        for match in decimal_matches:
-            try:
-                amount = Decimal(match)
-                if Decimal('0.01') <= amount <= Decimal('99999.99'):
-                    amounts.append(amount)
-            except:
-                continue
-        
-        return max(amounts) if amounts else Decimal('0.01')
-    
-    def _detect_currency(self, text: str) -> CurrencyEnum:
-        """Detect currency from text."""
-        text_upper = text.upper()
-        
-        for currency, patterns in self.currency_patterns.items():
-            for pattern in patterns:
-                if re.search(pattern, text_upper):
-                    return currency
-        
-        # Default to USD
-        return CurrencyEnum.USD
-    
-    def _classify_category(self, text: str, vendor: str) -> CategoryEnum:
-        """Automatically classify receipt category based on text and vendor."""
-        text_lower = (text + " " + vendor).lower()
-        
-        # Score each category based on keyword matches
-        category_scores = {}
-        
-        for category, keywords in self.category_keywords.items():
-            score = 0
-            for keyword in keywords:
-                # Count occurrences of each keyword
-                score += text_lower.count(keyword)
-            
-            if score > 0:
-                category_scores[category] = score
-        
-        # Return category with highest score
-        if category_scores:
-            return max(category_scores, key=category_scores.get)
-        
-        return CategoryEnum.OTHER
-    
-    def _generate_warnings(self, receipt: Receipt, confidence: float) -> List[str]:
-        """Generate warnings based on extraction quality."""
-        warnings = []
-        
-        if confidence < 70:
-            warnings.append(f"Low OCR confidence ({confidence:.1f}%). Please verify extracted data.")
-        
-        if receipt.vendor == "Unknown Vendor":
-            warnings.append("Could not identify vendor name. Please update manually.")
-        
-        if receipt.amount <= Decimal('0.01'):
-            warnings.append("Amount appears unusually low. Please verify.")
-        
-        if receipt.transaction_date == date.today():
-            warnings.append("Date defaulted to today. Please verify transaction date.")
-        
-        return warnings
+        # Return the largest amount found (likely the total), or default
+        if amounts_found:
+            return max(amounts_found)
+        else:
+            logger.warning("No valid amount found in text, using default")
+            return Decimal('0.01')  # Minimum valid amount

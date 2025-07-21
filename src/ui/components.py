@@ -1,540 +1,455 @@
 """
-Reusable UI components for the Streamlit application.
-Provides consistent styling and functionality across pages.
+UI Components Module - Reusable Streamlit Components
+
+This module provides reusable UI components and styling functions for consistent
+appearance across the application. Includes custom CSS, navigation elements,
+and common interface patterns.
+
+Author: Receipt Processing Team
+Version: 1.0.0
 """
 
 import streamlit as st
-import pandas as pd
-import plotly.express as px
-import plotly.graph_objects as go
-from datetime import date, datetime, timedelta
-from decimal import Decimal
-from typing import List, Optional, Dict, Any, Callable
+import tempfile
+import os
+from datetime import datetime
+from pathlib import Path
 
-from ..core.models import Receipt, SearchFilters, CategoryEnum, CurrencyEnum
+# Import core modules
+import sys
+src_path = Path(__file__).parent.parent
+sys.path.insert(0, str(src_path))
 
+from core.database import DatabaseManager
+from core.parsing import TextExtractor
 
-class UIComponents:
-    """Collection of reusable UI components."""
+def apply_custom_css():
+    """Apply custom CSS styling to the Streamlit app."""
+    st.markdown("""
+    <style>
+    /* Main app styling */
+    .main {
+        padding-top: 2rem;
+    }
     
-    @staticmethod
-    def render_receipt_filters() -> SearchFilters:
-        """
-        Render search and filter controls.
+    /* Header styling */
+    .main-header {
+        background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+        padding: 2rem;
+        border-radius: 10px;
+        color: white;
+        margin-bottom: 2rem;
+    }
+    
+    /* Metric cards */
+    .metric-card {
+        background: white;
+        padding: 1.5rem;
+        border-radius: 10px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        border-left: 4px solid #667eea;
+        margin-bottom: 1rem;
+    }
+    
+    /* Success/Error styling */
+    .success-box {
+        background-color: #d4edda;
+        border: 1px solid #c3e6cb;
+        border-radius: 5px;
+        padding: 1rem;
+        margin: 1rem 0;
+    }
+    
+    .error-box {
+        background-color: #f8d7da;
+        border: 1px solid #f5c6cb;
+        border-radius: 5px;
+        padding: 1rem;
+        margin: 1rem 0;
+    }
+    
+    /* Table styling */
+    .dataframe {
+        border: none !important;
+    }
+    
+    .dataframe th {
+        background-color: #667eea !important;
+        color: white !important;
+        font-weight: bold !important;
+    }
+    
+    .dataframe td {
+        border-bottom: 1px solid #e0e0e0 !important;
+    }
+    
+    /* Button styling */
+    .stButton > button {
+        border-radius: 20px;
+        border: none;
+        padding: 0.5rem 1rem;
+        font-weight: 500;
+        transition: all 0.3s ease;
+    }
+    
+    .stButton > button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+    }
+    
+    /* Sidebar styling */
+    .css-1d391kg {
+        background-color: #f8f9fa;
+    }
+    
+    /* File uploader styling */
+    .uploadedFile {
+        border: 2px dashed #667eea;
+        border-radius: 10px;
+        padding: 2rem;
+        text-align: center;
+        background-color: #f8f9ff;
+    }
+    
+    /* Progress bar styling */
+    .stProgress .st-bo {
+        background-color: #667eea;
+    }
+    
+    /* Expander styling */
+    .streamlit-expanderHeader {
+        background-color: #f8f9fa;
+        border-radius: 5px;
+    }
+    
+    /* Tab styling */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 2px;
+    }
+    
+    .stTabs [data-baseweb="tab"] {
+        height: 50px;
+        padding-left: 20px;
+        padding-right: 20px;
+        background-color: #f0f2f6;
+        border-radius: 10px 10px 0 0;
+    }
+    
+    .stTabs [aria-selected="true"] {
+        background-color: #667eea;
+        color: white;
+    }
+    
+    /* Custom animations */
+    @keyframes fadeIn {
+        from { opacity: 0; transform: translateY(20px); }
+        to { opacity: 1; transform: translateY(0); }
+    }
+    
+    .fade-in {
+        animation: fadeIn 0.5s ease-in;
+    }
+    
+    /* Responsive design */
+    @media (max-width: 768px) {
+        .main {
+            padding: 1rem;
+        }
         
-        Returns:
-            SearchFilters object with user inputs
-        """
-        st.subheader("🔍 Search & Filter")
+        .metric-card {
+            padding: 1rem;
+        }
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+def create_sidebar():
+    """Create consistent sidebar navigation."""
+    with st.sidebar:
+        st.markdown("## 🧾 Receipt Processor")
+        st.markdown("---")
         
-        col1, col2 = st.columns(2)
+        # Navigation
+        st.markdown("### 📍 Navigation")
+        
+        if st.button("🏠 Home", use_container_width=True):
+            st.switch_page("app.py")
+        
+        if st.button("🔍 Data Explorer", use_container_width=True):
+            st.switch_page("pages/1_Data_Explorer.py")
+        
+        if st.button("📊 Analytics", use_container_width=True):
+            st.switch_page("pages/2_Analytics_Dashboard.py")
+        
+        st.markdown("---")
+        
+        # Quick stats
+        try:
+            db_manager = DatabaseManager()
+            receipts = db_manager.get_all_receipts()
+            
+            st.markdown("### 📈 Quick Stats")
+            st.metric("Total Receipts", len(receipts))
+            
+            if receipts:
+                total_amount = sum(r.amount for r in receipts)
+                st.metric("Total Amount", f"${total_amount:,.2f}")
+                
+                # Recent activity
+                recent_receipts = sorted(receipts, key=lambda x: x.transaction_date, reverse=True)[:3]
+                
+                st.markdown("### 🕒 Recent Activity")
+                for receipt in recent_receipts:
+                    st.markdown(f"""
+                    **{receipt.vendor}**  
+                    ${receipt.amount} • {receipt.transaction_date.strftime('%m/%d/%Y')}
+                    """)
+            
+        except Exception as e:
+            st.error("Unable to load stats")
+        
+        st.markdown("---")
+        
+        # Help section
+        with st.expander("❓ Help & Tips"):
+            st.markdown("""
+            **Supported Formats:**
+            - PDF files
+            - Images (JPG, PNG, TIFF, BMP)
+            - Text files
+            
+            **Tips for Better OCR:**
+            - Use clear, well-lit images
+            - Avoid blurry or skewed photos
+            - Ensure text is readable
+            - Keep file sizes under 10MB
+            
+            **Search Features:**
+            - Use fuzzy search for similar names
+            - Filter by date ranges
+            - Set amount thresholds
+            - Filter by category or currency
+            """)
+        
+        # Footer
+        st.markdown("---")
+        st.markdown("""
+        <div style='text-align: center; color: #666; font-size: 0.8em;'>
+            <p>Receipt Processing App v1.0</p>
+            <p>Built with Streamlit</p>
+        </div>
+        """, unsafe_allow_html=True)
+
+def show_upload_interface():
+    """Display a compact upload interface for the main page."""
+    st.markdown("#### Quick Upload")
+    
+    uploaded_file = st.file_uploader(
+        "Drop a receipt file here",
+        type=['pdf', 'jpg', 'jpeg', 'png', 'tiff', 'bmp', 'txt'],
+        help="Supported: PDF, JPG, PNG, TIFF, BMP, TXT (max 10MB)"
+    )
+    
+    if uploaded_file:
+        col1, col2 = st.columns([3, 1])
         
         with col1:
-            vendor_query = st.text_input(
-                "Vendor Search",
-                placeholder="Search by vendor name...",
-                help="Enter partial vendor name to search"
-            )
-            
-            date_from = st.date_input(
-                "From Date",
-                value=None,
-                help="Filter receipts from this date onwards"
-            )
-            
-            amount_min = st.number_input(
-                "Minimum Amount ($)",
-                min_value=0.01,
-                value=None,
-                step=0.01,
-                format="%.2f",
-                help="Filter receipts with amount greater than or equal to this value"
-            )
+            st.info(f"📄 **{uploaded_file.name}** ({uploaded_file.size:,} bytes)")
         
         with col2:
-            category = st.selectbox(
-                "Category",
-                options=[None] + list(CategoryEnum),
-                format_func=lambda x: "All Categories" if x is None else x,
-                help="Filter by receipt category"
-            )
-            
-            date_to = st.date_input(
-                "To Date",
-                value=None,
-                help="Filter receipts up to this date"
-            )
-            
-            amount_max = st.number_input(
-                "Maximum Amount ($)",
-                min_value=0.01,
-                value=None,
-                step=0.01,
-                format="%.2f",
-                help="Filter receipts with amount less than or equal to this value"
-            )
+            if st.button("🚀 Process", type="primary"):
+                process_quick_upload(uploaded_file)
+
+def process_quick_upload(uploaded_file):
+    """Process a single uploaded file quickly."""
+    try:
+        # Create temporary file
+        with tempfile.NamedTemporaryFile(delete=False, suffix=Path(uploaded_file.name).suffix) as tmp_file:
+            tmp_file.write(uploaded_file.getvalue())
+            tmp_file_path = tmp_file.name
         
-        currency = st.selectbox(
-            "Currency",
-            options=[None] + list(CurrencyEnum),
-            format_func=lambda x: "All Currencies" if x is None else x,
-            help="Filter by currency"
-        )
+        # Process file
+        with st.spinner(f"Processing {uploaded_file.name}..."):
+            text_extractor = TextExtractor()
+            result = text_extractor.process_file(tmp_file_path, uploaded_file.name)
         
-        return SearchFilters(
-            vendor_query=vendor_query if vendor_query else None,
-            date_from=date_from,
-            date_to=date_to,
-            amount_min=Decimal(str(amount_min)) if amount_min else None,
-            amount_max=Decimal(str(amount_max)) if amount_max else None,
-            category=category,
-            currency=currency
-        )
-    
-    @staticmethod
-    def render_receipt_table(receipts: List[Receipt], editable: bool = False) -> Optional[Receipt]:
-        """
-        Render receipts in a table format with optional editing.
-        
-        Args:
-            receipts: List of receipts to display
-            editable: Whether to allow inline editing
+        if result.success and result.receipt:
+            # Save to database
+            db_manager = DatabaseManager()
+            receipt_id = db_manager.add_receipt(result.receipt)
             
-        Returns:
-            Modified receipt if editing occurred, None otherwise
-        """
-        if not receipts:
-            st.info("No receipts found matching your criteria.")
-            return None
-        
-        # Convert receipts to DataFrame for display
-        df_data = []
-        for receipt in receipts:
-            df_data.append({
-                'ID': receipt.id,
-                'Vendor': receipt.vendor,
-                'Date': receipt.transaction_date,
-                'Amount': f"${receipt.amount:.2f}",
-                'Category': receipt.category,
-                'Currency': receipt.currency,
-                'Confidence': f"{receipt.confidence_score:.1f}%" if receipt.confidence_score else "N/A"
-            })
-        
-        df = pd.DataFrame(df_data)
-        
-        if editable:
-            st.subheader("📝 Edit Receipts")
+            st.success(f"✅ Receipt processed and saved! (ID: {receipt_id})")
             
-            # Select receipt to edit
-            selected_id = st.selectbox(
-                "Select Receipt to Edit",
-                options=[r.id for r in receipts],
-                format_func=lambda x: f"ID {x}: {next(r.vendor for r in receipts if r.id == x)}"
-            )
-            
-            if selected_id:
-                selected_receipt = next(r for r in receipts if r.id == selected_id)
-                return UIComponents._render_receipt_editor(selected_receipt)
-        else:
-            # Display table with sorting options
-            sort_options = ['Date', 'Amount', 'Vendor', 'Category']
-            sort_by = st.selectbox("Sort by", sort_options, index=0)
-            sort_ascending = st.checkbox("Ascending", value=False)
-            
-            # Sort DataFrame
-            sort_column_map = {
-                'Date': 'Date',
-                'Amount': 'Amount',
-                'Vendor': 'Vendor',
-                'Category': 'Category'
-            }
-            
-            if sort_by in sort_column_map:
-                df = df.sort_values(
-                    by=sort_column_map[sort_by],
-                    ascending=sort_ascending
-                )
-            
-            # Display table
-            st.dataframe(
-                df,
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    'Amount': st.column_config.NumberColumn(
-                        'Amount',
-                        format="$%.2f"
-                    ),
-                    'Date': st.column_config.DateColumn(
-                        'Date',
-                        format="YYYY-MM-DD"
-                    )
-                }
-            )
-        
-        return None
-    
-    @staticmethod
-    def _render_receipt_editor(receipt: Receipt) -> Optional[Receipt]:
-        """
-        Render receipt editing form.
-        
-        Args:
-            receipt: Receipt to edit
-            
-        Returns:
-            Modified receipt if changes were made
-        """
-        with st.form(f"edit_receipt_{receipt.id}"):
-            st.write(f"**Editing Receipt ID: {receipt.id}**")
-            
-            col1, col2 = st.columns(2)
-            
+            # Show quick summary
+            col1, col2, col3 = st.columns(3)
             with col1:
-                vendor = st.text_input("Vendor", value=receipt.vendor)
-                transaction_date = st.date_input("Date", value=receipt.transaction_date)
-                amount = st.number_input(
-                    "Amount",
-                    value=float(receipt.amount),
-                    min_value=0.01,
-                    step=0.01,
-                    format="%.2f"
-                )
-            
+                st.metric("Vendor", result.receipt.vendor)
             with col2:
-                category = st.selectbox(
-                    "Category",
-                    options=list(CategoryEnum),
-                    index=list(CategoryEnum).index(receipt.category)
-                )
-                currency = st.selectbox(
-                    "Currency",
-                    options=list(CurrencyEnum),
-                    index=list(CurrencyEnum).index(receipt.currency)
-                )
+                st.metric("Amount", f"${result.receipt.amount}")
+            with col3:
+                st.metric("Confidence", f"{result.receipt.confidence_score:.1%}")
             
-            # Show extracted text for reference
-            if receipt.extracted_text:
-                with st.expander("View Extracted Text"):
-                    st.text_area(
-                        "Raw Text",
-                        value=receipt.extracted_text,
-                        height=150,
-                        disabled=True
-                    )
-            
-            submitted = st.form_submit_button("Save Changes", type="primary")
-            
-            if submitted:
-                # Create updated receipt
-                updated_receipt = Receipt(
-                    id=receipt.id,
-                    vendor=vendor,
-                    transaction_date=transaction_date,
-                    amount=Decimal(str(amount)),
-                    category=category,
-                    currency=currency,
-                    source_file=receipt.source_file,
-                    extracted_text=receipt.extracted_text,
-                    confidence_score=receipt.confidence_score,
-                    created_at=receipt.created_at,
-                    updated_at=datetime.now()
-                )
-                
-                st.success("Receipt updated successfully!")
-                return updated_receipt
-        
-        return None
-    
-    @staticmethod
-    def render_analytics_charts(analytics_data: Dict[str, Any]):
-        """
-        Render analytics charts and visualizations.
-        
-        Args:
-            analytics_data: Analytics data to visualize
-        """
-        if not analytics_data:
-            st.info("No data available for analytics.")
-            return
-        
-        # Key metrics
-        col1, col2, col3, col4 = st.columns(4)
-        
-        with col1:
-            st.metric(
-                "Total Receipts",
-                analytics_data.get('total_receipts', 0)
-            )
-        
-        with col2:
-            total_amount = analytics_data.get('total_amount', 0)
-            st.metric(
-                "Total Spent",
-                f"${total_amount:,.2f}"
-            )
-        
-        with col3:
-            avg_amount = analytics_data.get('average_amount', 0)
-            st.metric(
-                "Average Amount",
-                f"${avg_amount:.2f}"
-            )
-        
-        with col4:
-            date_range = analytics_data.get('date_range')
-            if date_range:
-                days = (date_range[1] - date_range[0]).days
-                st.metric("Date Range", f"{days} days")
-        
-        # Charts
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            # Top vendors chart
-            top_vendors = analytics_data.get('top_vendors', [])
-            if top_vendors:
-                st.subheader("Top Vendors by Spending")
-                
-                vendors_df = pd.DataFrame(top_vendors)
-                fig = px.bar(
-                    vendors_df.head(10),
-                    x='total_amount',
-                    y='vendor',
-                    orientation='h',
-                    title="Top 10 Vendors",
-                    labels={'total_amount': 'Total Amount ($)', 'vendor': 'Vendor'}
-                )
-                fig.update_layout(height=400)
-                st.plotly_chart(fig, use_container_width=True)
-        
-        with col2:
-            # Category breakdown
-            category_breakdown = analytics_data.get('category_breakdown', [])
-            if category_breakdown:
-                st.subheader("Spending by Category")
-                
-                categories_df = pd.DataFrame(category_breakdown)
-                fig = px.pie(
-                    categories_df,
-                    values='total_amount',
-                    names='category',
-                    title="Category Distribution"
-                )
-                fig.update_layout(height=400)
-                st.plotly_chart(fig, use_container_width=True)
-        
-        # Monthly trends
-        monthly_trends = analytics_data.get('monthly_trends', [])
-        if monthly_trends:
-            st.subheader("Monthly Spending Trends")
-            
-            trends_df = pd.DataFrame(monthly_trends)
-            trends_df = trends_df.sort_values('month')
-            
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(
-                x=trends_df['month'],
-                y=trends_df['total_amount'],
-                mode='lines+markers',
-                name='Total Amount',
-                line=dict(color='#1f77b4', width=3),
-                marker=dict(size=8)
-            ))
-            
-            fig.update_layout(
-                title="Monthly Spending Trend",
-                xaxis_title="Month",
-                yaxis_title="Total Amount ($)",
-                height=400,
-                showlegend=False
-            )
-            
-            st.plotly_chart(fig, use_container_width=True)
-    
-    @staticmethod
-    def render_file_uploader() -> Optional[bytes]:
-        """
-        Render file upload widget with validation.
-        
-        Returns:
-            Uploaded file bytes or None
-        """
-        st.subheader("📁 Upload Receipt")
-        
-        uploaded_file = st.file_uploader(
-            "Choose a receipt file",
-            type=['pdf', 'jpg', 'jpeg', 'png', 'tiff', 'bmp'],
-            help="Supported formats: PDF, JPG, PNG, TIFF, BMP (Max size: 10MB)"
-        )
-        
-        if uploaded_file is not None:
-            # Validate file size (10MB limit)
-            if uploaded_file.size > 10 * 1024 * 1024:
-                st.error("File size exceeds 10MB limit. Please upload a smaller file.")
-                return None
-            
-            # Display file info
-            st.info(f"**File:** {uploaded_file.name} ({uploaded_file.size:,} bytes)")
-            
-            return uploaded_file.getvalue()
-        
-        return None
-    
-    @staticmethod
-    def render_export_options(receipts: List[Receipt]):
-        """
-        Render data export options.
-        
-        Args:
-            receipts: List of receipts to export
-        """
-        if not receipts:
-            return
-        
-        st.subheader("📤 Export Data")
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            # CSV Export
-            if st.button("Export as CSV", type="secondary"):
-                csv_data = UIComponents._generate_csv(receipts)
-                st.download_button(
-                    label="Download CSV",
-                    data=csv_data,
-                    file_name=f"receipts_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                    mime="text/csv"
-                )
-        
-        with col2:
-            # JSON Export
-            if st.button("Export as JSON", type="secondary"):
-                json_data = UIComponents._generate_json(receipts)
-                st.download_button(
-                    label="Download JSON",
-                    data=json_data,
-                    file_name=f"receipts_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
-                    mime="application/json"
-                )
-    
-    @staticmethod
-    def _generate_csv(receipts: List[Receipt]) -> str:
-        """Generate CSV data from receipts."""
-        df_data = []
-        for receipt in receipts:
-            df_data.append({
-                'ID': receipt.id,
-                'Vendor': receipt.vendor,
-                'Date': receipt.transaction_date.isoformat(),
-                'Amount': float(receipt.amount),
-                'Category': receipt.category,
-                'Currency': receipt.currency,
-                'Source File': receipt.source_file,
-                'Confidence Score': receipt.confidence_score,
-                'Created At': receipt.created_at.isoformat() if receipt.created_at else '',
-                'Updated At': receipt.updated_at.isoformat() if receipt.updated_at else ''
-            })
-        
-        df = pd.DataFrame(df_data)
-        return df.to_csv(index=False)
-    
-    @staticmethod
-    def _generate_json(receipts: List[Receipt]) -> str:
-        """Generate JSON data from receipts."""
-        import json
-        
-        json_data = []
-        for receipt in receipts:
-            json_data.append({
-                'id': receipt.id,
-                'vendor': receipt.vendor,
-                'transaction_date': receipt.transaction_date.isoformat(),
-                'amount': float(receipt.amount),
-                'category': receipt.category,
-                'currency': receipt.currency,
-                'source_file': receipt.source_file,
-                'extracted_text': receipt.extracted_text,
-                'confidence_score': receipt.confidence_score,
-                'created_at': receipt.created_at.isoformat() if receipt.created_at else None,
-                'updated_at': receipt.updated_at.isoformat() if receipt.updated_at else None
-            })
-        
-        return json.dumps(json_data, indent=2)
-    
-    @staticmethod
-    def render_processing_status(processing_result):
-        """
-        Render processing status and results.
-        
-        Args:
-            processing_result: ProcessingResult object
-        """
-        if processing_result.success:
-            st.success("✅ File processed successfully!")
-            
-            if processing_result.processing_time:
-                st.info(f"⏱️ Processing time: {processing_result.processing_time:.2f} seconds")
-            
-            # Show warnings if any
-            if processing_result.warnings:
-                st.warning("⚠️ **Warnings:**")
-                for warning in processing_result.warnings:
-                    st.write(f"• {warning}")
-            
-            # Display extracted data
-            if processing_result.receipt:
-                receipt = processing_result.receipt
-                
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    st.write("**Extracted Information:**")
-                    st.write(f"• **Vendor:** {receipt.vendor}")
-                    st.write(f"• **Date:** {receipt.transaction_date}")
-                    st.write(f"• **Amount:** ${receipt.amount}")
-                    st.write(f"• **Category:** {receipt.category}")
-                
-                with col2:
-                    st.write("**Processing Details:**")
-                    st.write(f"• **Currency:** {receipt.currency}")
-                    st.write(f"• **Confidence:** {receipt.confidence_score:.1f}%")
-                    st.write(f"• **Source:** {receipt.source_file}")
+            st.balloons()
         else:
-            st.error(f"❌ Processing failed: {processing_result.error_message}")
+            st.error(f"❌ Processing failed: {result.error_message}")
+        
+        # Clean up
+        os.unlink(tmp_file_path)
+        
+    except Exception as e:
+        st.error(f"Upload processing failed: {e}")
+
+def create_metric_card(title, value, delta=None, help_text=None):
+    """Create a styled metric card."""
+    delta_html = ""
+    if delta:
+        delta_color = "green" if delta > 0 else "red"
+        delta_symbol = "↗" if delta > 0 else "↘"
+        delta_html = f"""
+        <div style="color: {delta_color}; font-size: 0.8em; margin-top: 0.5rem;">
+            {delta_symbol} {delta}
+        </div>
+        """
     
-    @staticmethod
-    def render_sidebar_info():
-        """Render sidebar information and navigation."""
-        with st.sidebar:
-            st.title("🧾 Receipt Processor")
-            st.markdown("---")
-            
-            st.markdown("""
-            ### Features
-            - 📁 Multi-format file support (PDF, Images)
-            - 🔍 Advanced OCR text extraction
-            - 📊 Comprehensive analytics
-            - ✏️ Manual data correction
-            - 📤 Data export (CSV, JSON)
-            - 🔎 Intelligent search & filtering
-            """)
-            
-            st.markdown("---")
-            
-            st.markdown("""
-            ### Supported Formats
-            - **PDF:** Text-based and scanned
-            - **Images:** JPG, PNG, TIFF, BMP
-            - **Max Size:** 10MB per file
-            """)
-            
-            st.markdown("---")
-            
-            st.markdown("""
-            ### Tips for Better Results
-            - Use high-quality, well-lit images
-            - Ensure receipts are flat and unfolded
-            - Avoid blurry or skewed images
-            - Review and correct extracted data
-            """)
+    help_html = ""
+    if help_text:
+        help_html = f"""
+        <div style="color: #666; font-size: 0.7em; margin-top: 0.5rem;">
+            {help_text}
+        </div>
+        """
+    
+    st.markdown(f"""
+    <div class="metric-card">
+        <div style="font-size: 0.8em; color: #666; margin-bottom: 0.5rem;">{title}</div>
+        <div style="font-size: 2em; font-weight: bold; color: #333;">{value}</div>
+        {delta_html}
+        {help_html}
+    </div>
+    """, unsafe_allow_html=True)
+
+def show_loading_spinner(message="Loading..."):
+    """Show a loading spinner with custom message."""
+    return st.spinner(message)
+
+def create_info_box(message, box_type="info"):
+    """Create styled info boxes."""
+    colors = {
+        "info": {"bg": "#d1ecf1", "border": "#bee5eb", "text": "#0c5460"},
+        "success": {"bg": "#d4edda", "border": "#c3e6cb", "text": "#155724"},
+        "warning": {"bg": "#fff3cd", "border": "#ffeaa7", "text": "#856404"},
+        "error": {"bg": "#f8d7da", "border": "#f5c6cb", "text": "#721c24"}
+    }
+    
+    color = colors.get(box_type, colors["info"])
+    
+    st.markdown(f"""
+    <div style="
+        background-color: {color['bg']};
+        border: 1px solid {color['border']};
+        border-radius: 5px;
+        padding: 1rem;
+        margin: 1rem 0;
+        color: {color['text']};
+    ">
+        {message}
+    </div>
+    """, unsafe_allow_html=True)
+
+def create_progress_bar(progress, message=""):
+    """Create a styled progress bar."""
+    st.progress(progress, text=message)
+
+def format_currency(amount, currency="USD"):
+    """Format currency amounts consistently."""
+    symbols = {
+        "USD": "$",
+        "EUR": "€",
+        "GBP": "£",
+        "JPY": "¥",
+        "CAD": "C$",
+        "AUD": "A$",
+        "CHF": "CHF",
+        "CNY": "¥"
+    }
+    
+    symbol = symbols.get(currency, currency)
+    return f"{symbol}{amount:,.2f}"
+
+def create_data_table(data, columns=None, key=None):
+    """Create a styled data table with consistent formatting."""
+    if columns:
+        data = data[columns]
+    
+    return st.dataframe(
+        data,
+        use_container_width=True,
+        hide_index=True,
+        key=key
+    )
+
+def show_confirmation_dialog(message, key=None):
+    """Show a confirmation dialog."""
+    st.warning(message)
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        confirm = st.button("✅ Confirm", key=f"confirm_{key}", type="primary")
+    
+    with col2:
+        cancel = st.button("❌ Cancel", key=f"cancel_{key}")
+    
+    return confirm, cancel
+
+def create_status_badge(status, text):
+    """Create a status badge with appropriate styling."""
+    colors = {
+        "success": {"bg": "#28a745", "text": "white"},
+        "warning": {"bg": "#ffc107", "text": "black"},
+        "error": {"bg": "#dc3545", "text": "white"},
+        "info": {"bg": "#17a2b8", "text": "white"},
+        "secondary": {"bg": "#6c757d", "text": "white"}
+    }
+    
+    color = colors.get(status, colors["secondary"])
+    
+    return f"""
+    <span style="
+        background-color: {color['bg']};
+        color: {color['text']};
+        padding: 0.25rem 0.5rem;
+        border-radius: 12px;
+        font-size: 0.75rem;
+        font-weight: bold;
+        text-transform: uppercase;
+    ">
+        {text}
+    </span>
+    """
+
+def show_feature_coming_soon(feature_name):
+    """Display a 'coming soon' message for features under development."""
+    st.info(f"🚧 **{feature_name}** is coming soon! This feature is currently under development.")
+
+def create_expandable_section(title, content, expanded=False):
+    """Create an expandable section with consistent styling."""
+    with st.expander(title, expanded=expanded):
+        content()
+
+def show_empty_state(message, action_text=None, action_callback=None):
+    """Show an empty state with optional action."""
+    st.markdown(f"""
+    <div style="
+        text-align: center;
+        padding: 3rem;
+        color: #666;
+    ">
+        <div style="font-size: 3rem; margin-bottom: 1rem;">📭</div>
+        <div style="font-size: 1.2rem; margin-bottom: 1rem;">{message}</div>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    if action_text and action_callback:
+        if st.button(action_text, type="primary"):
+            action_callback()

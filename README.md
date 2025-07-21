@@ -139,6 +139,19 @@ Open your browser and navigate to `http://localhost:8501`
 - Download files with timestamp-based naming
 - Preserve all receipt metadata in exports
 
+## 🚀 Deployment
+
+### Railway Deployment
+This application is configured for Railway deployment with:
+- `nixpacks.toml` for build configuration
+- `Procfile` for start command
+- Automatic Tesseract OCR installation
+
+### Other Platforms
+- **Streamlit Cloud**: Direct GitHub integration
+- **Heroku**: Python buildpack support
+- **Docker**: Containerized deployment ready
+
 ## 🔧 Configuration
 
 ### Environment Variables
@@ -256,3 +269,4 @@ For support and questions:
 ---
 
 **Built with ❤️ using Python, Streamlit, and modern web technologies**
+\`\`\`
