@@ -76,10 +76,10 @@ RUN mkdir -p /app/data /app/uploads /app/logs \
 # Copy application code and startup script
 COPY --chown=appuser:appuser src/ ./src/
 COPY --chown=appuser:appuser requirements.txt ./
-COPY --chown=appuser:appuser start.sh ./
+COPY --chown=appuser:appuser start.py ./
 
 # Make startup script executable
-RUN chmod +x start.sh
+RUN chmod +x start.py
 
 # Create .streamlit directory and config
 RUN mkdir -p /app/.streamlit && \
@@ -106,5 +106,5 @@ EXPOSE 8501
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:${PORT:-8501}/_stcore/health || exit 1
 
-# Use the startup script as default command
-CMD sh -c 'unset STREAMLIT_SERVER_PORT && streamlit run src/app.py --server.port ${PORT:-8501} --server.address 0.0.0.0 --server.headless true'
+# Use the Python startup script as default command
+CMD ["python", "start.py"]
