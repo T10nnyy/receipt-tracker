@@ -6,7 +6,7 @@ appearance across the application. Includes custom CSS, navigation elements,
 and common interface patterns.
 
 Author: Receipt Processing Team
-Version: 1.0.0
+Version: 1.0.1 - Fixed import handling
 """
 
 import streamlit as st
@@ -14,13 +14,53 @@ import tempfile
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Union
 import pandas as pd
-from core.database import DatabaseManager
-from core.parsing import TextExtractor
-from core.models import Receipt
-import plotly.express as px
-import plotly.graph_objects as go
+
+# Handle imports with fallbacks
+try:
+    from core.database import DatabaseManager
+except ImportError:
+    st.warning("Database module not available. Some features may be limited.")
+    DatabaseManager = None
+
+try:
+    from core.parsing import TextExtractor
+except ImportError:
+    st.warning("Text extraction module not available. Upload processing disabled.")
+    TextExtractor = None
+
+try:
+    from core.models import Receipt
+except ImportError:
+    st.warning("Receipt models not available. Using fallback structure.")
+    # Create a simple Receipt class as fallback
+    class Receipt:
+        def __init__(self, **kwargs):
+            self.id = kwargs.get('id', '')
+            self.store_name = kwargs.get('store_name', 'Unknown')
+            self.vendor = kwargs.get('vendor', self.store_name)
+            self.total = kwargs.get('total', 0.0)
+            self.amount = kwargs.get('amount', self.total)
+            self.total_amount = kwargs.get('total_amount', self.amount)
+            self.date = kwargs.get('date', datetime.now())
+            self.transaction_date = kwargs.get('transaction_date', self.date)
+            self.category = kwargs.get('category', 'Other')
+            self.payment_method = kwargs.get('payment_method', 'Unknown')
+            self.items = kwargs.get('items', [])
+            self.created_at = kwargs.get('created_at', datetime.now())
+            self.confidence_score = kwargs.get('confidence_score', 0.0)
+            self.merchant_name = kwargs.get('merchant_name', self.store_name)
+
+try:
+    import plotly.express as px
+    import plotly.graph_objects as go
+    PLOTLY_AVAILABLE = True
+except ImportError:
+    st.warning("Plotly not available. Charts will be disabled.")
+    PLOTLY_AVAILABLE = False
+    px = None
+    go = None
 
 def apply_custom_css():
     """Apply custom CSS styling to the Streamlit app."""
@@ -159,33 +199,74 @@ def apply_custom_css():
             padding: 1rem;
         }
     }
+    
+    /* Warning boxes */
+    .warning-box {
+        background-color: #fff3cd;
+        border: 1px solid #ffeeba;
+        border-radius: 5px;
+        padding: 1rem;
+        margin: 1rem 0;
+        border-left: 4px solid #ffc107;
+    }
+    
+    /* Info boxes */
+    .info-box {
+        background-color: #d1ecf1;
+        border: 1px solid #bee5eb;
+        border-radius: 5px;
+        padding: 1rem;
+        margin: 1rem 0;
+        border-left: 4px solid #17a2b8;
+    }
     </style>
     """, unsafe_allow_html=True)
 
 def create_sidebar():
-    """Create the application sidebar"""
+    """Create the application sidebar with error handling"""
     with st.sidebar:
         st.header("🧾 Receipt Processor")
         st.markdown("---")
         
         # Navigation
         st.subheader("Navigation")
-        st.page_link("src/app.py", label="🏠 Home", icon="🏠")
-        st.page_link("src/pages/1_Data_Explorer.py", label="📊 Data Explorer", icon="📊")
-        st.page_link("src/pages/2_Analytics_Dashboard.py", label="📈 Analytics", icon="📈")
+        try:
+            # Check if we're in a multi-page app structure
+            if os.path.exists("src/pages"):
+                st.page_link("src/app.py", label="🏠 Home", icon="🏠")
+                st.page_link("src/pages/1_Data_Explorer.py", label="📊 Data Explorer", icon="📊")
+                st.page_link("src/pages/2_Analytics_Dashboard.py", label="📈 Analytics", icon="📈")
+            else:
+                # Fallback navigation
+                st.markdown("- 🏠 Home (current)")
+                st.markdown("- 📊 Data Explorer")
+                st.markdown("- 📈 Analytics")
+        except Exception as e:
+            st.markdown("Navigation unavailable")
         
         st.markdown("---")
         
-        # Quick stats
+        # Quick stats with error handling
         st.subheader("Quick Stats")
         try:
-            if 'db' in st.session_state:
+            if DatabaseManager and 'db' in st.session_state and st.session_state.db:
                 stats = st.session_state.db.get_statistics()
-                st.metric("Total Receipts", stats.total_receipts)
-                st.metric("Total Spent", f"${stats.total_spent:.2f}")
-                st.metric("This Month", f"${stats.spending_this_month:.2f}")
+                st.metric("Total Receipts", getattr(stats, 'total_receipts', 0))
+                st.metric("Total Spent", f"${getattr(stats, 'total_spent', 0):.2f}")
+                st.metric("This Month", f"${getattr(stats, 'spending_this_month', 0):.2f}")
+            else:
+                # Fallback stats
+                st.metric("Total Receipts", "0")
+                st.metric("Total Spent", "$0.00")
+                st.metric("This Month", "$0.00")
+                if not DatabaseManager:
+                    st.caption("Database not connected")
         except Exception as e:
             st.error(f"Error loading stats: {str(e)}")
+            # Show fallback stats
+            st.metric("Total Receipts", "Error")
+            st.metric("Total Spent", "Error")
+            st.metric("This Month", "Error")
         
         st.markdown("---")
         
@@ -193,81 +274,142 @@ def create_sidebar():
         st.subheader("Settings")
         st.selectbox("Theme", ["Light", "Dark"], disabled=True, help="Coming soon!")
         st.selectbox("Currency", ["USD", "EUR", "GBP"], disabled=True, help="Coming soon!")
+        
+        # System status
+        st.markdown("---")
+        st.subheader("System Status")
+        st.success("✅ UI Components") if True else st.error("❌ UI Components")
+        st.success("✅ Database") if DatabaseManager else st.error("❌ Database")
+        st.success("✅ Text Extraction") if TextExtractor else st.error("❌ Text Extraction")
+        st.success("✅ Charts") if PLOTLY_AVAILABLE else st.error("❌ Charts")
+
+def safe_get_attribute(obj, attr, default=None):
+    """Safely get an attribute from an object"""
+    try:
+        return getattr(obj, attr, default)
+    except Exception:
+        return default
 
 def display_receipt_card(receipt):
-    """Display a receipt card"""
-    with st.container():
-        col1, col2 = st.columns([3, 1])
-        
-        with col1:
-            st.write(f"**{receipt.store_name}**")
-            st.write(f"{receipt.date.strftime('%Y-%m-%d')}")
-            if receipt.items:
-                st.write(f"{len(receipt.items)} items")
-        
-        with col2:
-            st.write(f"**${receipt.total:.2f}**")
-            st.write(f"_{receipt.category}_")
-        
+    """Display a receipt card with error handling"""
+    try:
+        with st.container():
+            col1, col2 = st.columns([3, 1])
+            
+            with col1:
+                store_name = safe_get_attribute(receipt, 'store_name') or safe_get_attribute(receipt, 'vendor') or 'Unknown Store'
+                st.write(f"**{store_name}**")
+                
+                receipt_date = safe_get_attribute(receipt, 'date') or safe_get_attribute(receipt, 'transaction_date')
+                if receipt_date:
+                    if hasattr(receipt_date, 'strftime'):
+                        st.write(f"{receipt_date.strftime('%Y-%m-%d')}")
+                    else:
+                        st.write(f"{receipt_date}")
+                
+                items = safe_get_attribute(receipt, 'items', [])
+                if items and len(items) > 0:
+                    st.write(f"{len(items)} items")
+            
+            with col2:
+                total = safe_get_attribute(receipt, 'total') or safe_get_attribute(receipt, 'amount') or safe_get_attribute(receipt, 'total_amount') or 0
+                st.write(f"**${float(total):.2f}**")
+                
+                category = safe_get_attribute(receipt, 'category') or 'Other'
+                st.write(f"_{category}_")
+            
+            st.markdown("---")
+    
+    except Exception as e:
+        st.error(f"Error displaying receipt: {str(e)}")
+        # Show fallback card
+        st.write("**Receipt**")
+        st.write("Error loading details")
         st.markdown("---")
 
 def create_metrics_row(stats: Dict[str, Any]):
-    """Create a row of metrics"""
-    col1, col2, col3, col4 = st.columns(4)
+    """Create a row of metrics with error handling"""
+    try:
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            st.metric(
+                "Total Receipts",
+                stats.get('total_receipts', 0)
+            )
+        
+        with col2:
+            st.metric(
+                "Total Spent",
+                f"${stats.get('total_spent', 0):.2f}"
+            )
+        
+        with col3:
+            st.metric(
+                "Average Receipt",
+                f"${stats.get('average_receipt', 0):.2f}"
+            )
+        
+        with col4:
+            st.metric(
+                "This Month",
+                f"${stats.get('spending_this_month', 0):.2f}"
+            )
     
-    with col1:
-        st.metric(
-            "Total Receipts",
-            stats.get('total_receipts', 0)
-        )
-    
-    with col2:
-        st.metric(
-            "Total Spent",
-            f"${stats.get('total_spent', 0):.2f}"
-        )
-    
-    with col3:
-        st.metric(
-            "Average Receipt",
-            f"${stats.get('average_receipt', 0):.2f}"
-        )
-    
-    with col4:
-        st.metric(
-            "This Month",
-            f"${stats.get('spending_this_month', 0):.2f}"
-        )
+    except Exception as e:
+        st.error(f"Error creating metrics: {str(e)}")
+        # Show fallback metrics
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Total Receipts", "Error")
+        with col2:
+            st.metric("Total Spent", "Error")
+        with col3:
+            st.metric("Average Receipt", "Error")
+        with col4:
+            st.metric("This Month", "Error")
 
 def create_spending_chart(data: List[Dict[str, Any]], chart_type: str = "bar"):
-    """Create a spending chart"""
-    if not data:
-        st.info("No data available for chart")
+    """Create a spending chart with error handling"""
+    if not PLOTLY_AVAILABLE:
+        st.warning("Charts are not available. Install plotly to enable charts.")
         return
     
-    if chart_type == "bar":
-        fig = px.bar(
-            data,
-            x='category',
-            y='total',
-            title='Spending by Category'
-        )
-    elif chart_type == "pie":
-        fig = px.pie(
-            data,
-            values='total',
-            names='category',
-            title='Spending Distribution'
-        )
-    else:
-        fig = px.line(
-            data,
-            x='date',
-            y='total',
-            title='Spending Over Time'
-        )
+    try:
+        if not data:
+            st.info("No data available for chart")
+            return
+        
+        if chart_type == "bar":
+            fig = px.bar(
+                data,
+                x='category',
+                y='total',
+                title='Spending by Category'
+            )
+        elif chart_type == "pie":
+            fig = px.pie(
+                data,
+                values='total',
+                names='category',
+                title='Spending Distribution'
+            )
+        else:
+            fig = px.line(
+                data,
+                x='date',
+                y='total',
+                title='Spending Over Time'
+            )
+        
+        st.plotly_chart(fig, use_container_width=True)
     
-    st.plotly_chart(fig, use_container_width=True)
+    except Exception as e:
+        st.error(f"Error creating chart: {str(e)}")
+        # Show fallback table
+        st.subheader("Data Table (Chart unavailable)")
+        df = pd.DataFrame(data)
+        st.dataframe(df)
 
 def display_error_message(error: str, details: str = None):
     """Display a formatted error message"""
@@ -300,106 +442,168 @@ def create_upload_area():
     return uploaded_file
 
 def create_filter_sidebar(df):
-    """Create filter controls in sidebar"""
-    st.sidebar.header("Filters")
-    
-    filters = {}
-    
-    # Date range filter
-    if 'date' in df.columns:
-        min_date = df['date'].min().date()
-        max_date = df['date'].max().date()
+    """Create filter controls in sidebar with error handling"""
+    try:
+        st.sidebar.header("Filters")
         
-        filters['date_range'] = st.sidebar.date_input(
-            "Date Range",
-            value=(min_date, max_date),
-            min_value=min_date,
-            max_value=max_date
-        )
+        filters = {}
+        
+        if df is None or df.empty:
+            st.sidebar.info("No data available for filtering")
+            return filters
+        
+        # Date range filter
+        if 'date' in df.columns:
+            try:
+                min_date = pd.to_datetime(df['date']).min().date()
+                max_date = pd.to_datetime(df['date']).max().date()
+                
+                filters['date_range'] = st.sidebar.date_input(
+                    "Date Range",
+                    value=(min_date, max_date),
+                    min_value=min_date,
+                    max_value=max_date
+                )
+            except Exception as e:
+                st.sidebar.error("Error with date filter")
+        
+        # Category filter
+        if 'category' in df.columns:
+            try:
+                categories = ['All'] + list(df['category'].dropna().unique())
+                filters['category'] = st.sidebar.selectbox("Category", categories)
+            except Exception:
+                st.sidebar.error("Error with category filter")
+        
+        # Store filter
+        if 'store_name' in df.columns:
+            try:
+                stores = ['All'] + list(df['store_name'].dropna().unique())
+                filters['store'] = st.sidebar.selectbox("Store", stores)
+            except Exception:
+                st.sidebar.error("Error with store filter")
+        
+        # Amount range filter
+        if 'total' in df.columns:
+            try:
+                min_amount = float(df['total'].min())
+                max_amount = float(df['total'].max())
+                filters['amount_range'] = st.sidebar.slider(
+                    "Amount Range",
+                    min_value=min_amount,
+                    max_value=max_amount,
+                    value=(min_amount, max_amount)
+                )
+            except Exception:
+                st.sidebar.error("Error with amount filter")
+        
+        return filters
     
-    # Category filter
-    if 'category' in df.columns:
-        categories = ['All'] + list(df['category'].unique())
-        filters['category'] = st.sidebar.selectbox("Category", categories)
-    
-    # Store filter
-    if 'store_name' in df.columns:
-        stores = ['All'] + list(df['store_name'].unique())
-        filters['store'] = st.sidebar.selectbox("Store", stores)
-    
-    # Amount range filter
-    if 'total' in df.columns:
-        min_amount = float(df['total'].min())
-        max_amount = float(df['total'].max())
-        filters['amount_range'] = st.sidebar.slider(
-            "Amount Range",
-            min_value=min_amount,
-            max_value=max_amount,
-            value=(min_amount, max_amount)
-        )
-    
-    return filters
+    except Exception as e:
+        st.sidebar.error(f"Error creating filters: {str(e)}")
+        return {}
 
 def apply_filters(df, filters):
-    """Apply filters to dataframe"""
-    filtered_df = df.copy()
+    """Apply filters to dataframe with error handling"""
+    try:
+        if df is None or df.empty or not filters:
+            return df
+        
+        filtered_df = df.copy()
+        
+        # Apply date filter
+        if 'date_range' in filters and len(filters['date_range']) == 2:
+            try:
+                start_date, end_date = filters['date_range']
+                df_dates = pd.to_datetime(filtered_df['date']).dt.date
+                filtered_df = filtered_df[
+                    (df_dates >= start_date) & 
+                    (df_dates <= end_date)
+                ]
+            except Exception:
+                pass  # Skip this filter if it fails
+        
+        # Apply category filter
+        if 'category' in filters and filters['category'] != 'All':
+            try:
+                filtered_df = filtered_df[filtered_df['category'] == filters['category']]
+            except Exception:
+                pass
+        
+        # Apply store filter
+        if 'store' in filters and filters['store'] != 'All':
+            try:
+                filtered_df = filtered_df[filtered_df['store_name'] == filters['store']]
+            except Exception:
+                pass
+        
+        # Apply amount filter
+        if 'amount_range' in filters:
+            try:
+                min_amount, max_amount = filters['amount_range']
+                filtered_df = filtered_df[
+                    (filtered_df['total'] >= min_amount) & 
+                    (filtered_df['total'] <= max_amount)
+                ]
+            except Exception:
+                pass
+        
+        return filtered_df
     
-    # Apply date filter
-    if 'date_range' in filters and len(filters['date_range']) == 2:
-        start_date, end_date = filters['date_range']
-        filtered_df = filtered_df[
-            (filtered_df['date'].dt.date >= start_date) & 
-            (filtered_df['date'].dt.date <= end_date)
-        ]
-    
-    # Apply category filter
-    if 'category' in filters and filters['category'] != 'All':
-        filtered_df = filtered_df[filtered_df['category'] == filters['category']]
-    
-    # Apply store filter
-    if 'store' in filters and filters['store'] != 'All':
-        filtered_df = filtered_df[filtered_df['store_name'] == filters['store']]
-    
-    # Apply amount filter
-    if 'amount_range' in filters:
-        min_amount, max_amount = filters['amount_range']
-        filtered_df = filtered_df[
-            (filtered_df['total'] >= min_amount) & 
-            (filtered_df['total'] <= max_amount)
-        ]
-    
-    return filtered_df
+    except Exception as e:
+        st.error(f"Error applying filters: {str(e)}")
+        return df
 
 def create_export_buttons(df, filename_prefix="receipts"):
-    """Create export buttons for data"""
-    col1, col2 = st.columns(2)
+    """Create export buttons for data with error handling"""
+    try:
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            if st.button("📄 Export CSV"):
+                try:
+                    csv_data = df.to_csv(index=False)
+                    st.download_button(
+                        label="Download CSV",
+                        data=csv_data,
+                        file_name=f"{filename_prefix}_{datetime.now().strftime('%Y%m%d')}.csv",
+                        mime="text/csv"
+                    )
+                except Exception as e:
+                    st.error(f"Error creating CSV: {str(e)}")
+        
+        with col2:
+            if st.button("📊 Export Excel"):
+                try:
+                    import io
+                    output = io.BytesIO()
+                    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                        df.to_excel(writer, sheet_name='Data', index=False)
+                    
+                    st.download_button(
+                        label="Download Excel",
+                        data=output.getvalue(),
+                        file_name=f"{filename_prefix}_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+                except ImportError:
+                    st.error("Excel export requires openpyxl. Please install it.")
+                except Exception as e:
+                    st.error(f"Error creating Excel: {str(e)}")
     
-    with col1:
-        if st.button("📄 Export CSV"):
-            csv_data = df.to_csv(index=False)
-            st.download_button(
-                label="Download CSV",
-                data=csv_data,
-                file_name=f"{filename_prefix}_{datetime.now().strftime('%Y%m%d')}.csv",
-                mime="text/csv"
-            )
-    
-    with col2:
-        if st.button("📊 Export Excel"):
-            import io
-            output = io.BytesIO()
-            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                df.to_excel(writer, sheet_name='Data', index=False)
-            
-            st.download_button(
-                label="Download Excel",
-                data=output.getvalue(),
-                file_name=f"{filename_prefix}_{datetime.now().strftime('%Y%m%d')}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
+    except Exception as e:
+        st.error(f"Error creating export buttons: {str(e)}")
 
 def process_quick_upload(uploaded_file):
-    """Process a single uploaded file quickly."""
+    """Process a single uploaded file quickly with error handling."""
+    if not TextExtractor:
+        st.error("Text extraction not available. Please check your installation.")
+        return
+    
+    if not DatabaseManager:
+        st.error("Database not available. Please check your installation.")
+        return
+    
     try:
         # Create temporary file
         with tempfile.NamedTemporaryFile(delete=False, suffix=Path(uploaded_file.name).suffix) as tmp_file:
@@ -411,7 +615,7 @@ def process_quick_upload(uploaded_file):
             text_extractor = TextExtractor()
             result = text_extractor.process_file(tmp_file_path, uploaded_file.name)
         
-        if result.success and result.receipt:
+        if hasattr(result, 'success') and result.success and hasattr(result, 'receipt'):
             # Save to database
             db_manager = DatabaseManager()
             receipt_id = db_manager.add_receipt(result.receipt)
@@ -421,648 +625,181 @@ def process_quick_upload(uploaded_file):
             # Show quick summary
             col1, col2, col3 = st.columns(3)
             with col1:
-                st.metric("Vendor", result.receipt.vendor)
+                vendor = safe_get_attribute(result.receipt, 'vendor', 'Unknown')
+                st.metric("Vendor", vendor)
             with col2:
-                st.metric("Amount", f"${result.receipt.amount}")
+                amount = safe_get_attribute(result.receipt, 'amount', 0)
+                st.metric("Amount", f"${float(amount):.2f}")
             with col3:
-                st.metric("Confidence", f"{result.receipt.confidence_score:.1%}")
+                confidence = safe_get_attribute(result.receipt, 'confidence_score', 0)
+                st.metric("Confidence", f"{float(confidence)*100:.1f}%")
             
             st.balloons()
         else:
-            st.error(f"❌ Processing failed: {result.error_message}")
+            error_msg = getattr(result, 'error_message', 'Processing failed')
+            st.error(f"❌ Processing failed: {error_msg}")
         
         # Clean up
         os.unlink(tmp_file_path)
         
     except Exception as e:
-        st.error(f"Upload processing failed: {e}")
+        st.error(f"Upload processing failed: {str(e)}")
+        # Clean up temp file if it exists
+        try:
+            if 'tmp_file_path' in locals():
+                os.unlink(tmp_file_path)
+        except:
+            pass
 
-def create_metric_card(title: str, value: str, delta: Optional[str] = None, delta_color: str = "normal") -> None:
-    """Create a metric card component"""
-    st.metric(
-        label=title,
-        value=value,
-        delta=delta,
-        delta_color=delta_color
-    )
+# Additional utility functions with error handling
 
-def show_loading_spinner(message="Loading..."):
-    """Show a loading spinner with custom message."""
-    return st.spinner(message)
-
-def create_info_box(title: str, content: str, box_type: str = "info") -> None:
-    """Create an information box"""
-    
-    icons = {
-        "info": "ℹ️",
-        "warning": "⚠️",
-        "error": "❌",
-        "success": "✅",
-        "tip": "💡"
-    }
-    
-    colors = {
-        "info": "#d1ecf1",
-        "warning": "#fff3cd",
-        "error": "#f8d7da",
-        "success": "#d4edda",
-        "tip": "#e2e3e5"
-    }
-    
-    icon = icons.get(box_type, "ℹ️")
-    bg_color = colors.get(box_type, colors["info"])
-    
-    st.markdown(
-        f"""
-        <div style="
-            background-color: {bg_color};
-            padding: 1rem;
-            border-radius: 0.5rem;
-            border-left: 4px solid #007bff;
-            margin: 1rem 0;
-        ">
-            <h4 style="margin: 0 0 0.5rem 0;">{icon} {title}</h4>
-            <p style="margin: 0;">{content}</p>
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
-
-def create_progress_bar(progress, message=""):
-    """Create a styled progress bar."""
-    st.progress(progress, text=message)
-
-def format_currency(amount, currency="USD"):
-    """Format currency amounts consistently."""
-    symbols = {
-        "USD": "$",
-        "EUR": "€",
-        "GBP": "£",
-        "JPY": "¥",
-        "CAD": "C$",
-        "AUD": "A$",
-        "CHF": "CHF",
-        "CNY": "¥"
-    }
-    
-    symbol = symbols.get(currency, currency)
-    return f"{symbol}{amount:,.2f}"
-
-def create_data_table(data: List[Dict], columns: List[str], selectable: bool = False, sortable: bool = True, searchable: bool = False) -> Optional[List[int]]:
-    """Create a standardized data table"""
-    
-    if not data:
-        st.info("No data to display")
-        return None
-    
-    df = pd.DataFrame(data)
-    
-    if columns:
-        df = df[columns]
-    
-    if searchable:
-        search_term = st.text_input("🔍 Search table", key="table_search")
-        if search_term:
-            # Simple text search across all columns
-            mask = df.astype(str).apply(
-                lambda x: x.str.contains(search_term, case=False, na=False)
-            ).any(axis=1)
-            df = df[mask]
-    
-    # Display table
-    if selectable:
-        event = st.dataframe(
-            df,
-            use_container_width=True,
-            hide_index=True,
-            on_select="rerun",
-            selection_mode="multi-row"
-        )
-        return event.selection.rows if hasattr(event, 'selection') else []
-    else:
-        st.dataframe(df, use_container_width=True, hide_index=True)
-        return None
-
-def show_confirmation_dialog(message, key=None):
-    """Show a confirmation dialog."""
-    st.warning(message)
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        confirm = st.button("✅ Confirm", key=f"confirm_{key}", type="primary")
-    
-    with col2:
-        cancel = st.button("❌ Cancel", key=f"cancel_{key}")
-    
-    return confirm, cancel
-
-def create_status_badge(status: str, color: str = "blue") -> None:
-    """Create a status badge"""
-    colors = {
-        "success": "#28a745",
-        "error": "#dc3545",
-        "warning": "#ffc107",
-        "info": "#17a2b8",
-        "blue": "#007bff"
-    }
-    
-    bg_color = colors.get(color, colors["blue"])
-    
-    st.markdown(
-        f"""
-        <span style="
-            background-color: {bg_color};
-            color: white;
-            padding: 0.25rem 0.5rem;
-            border-radius: 0.25rem;
-            font-size: 0.875rem;
-            font-weight: 500;
-        ">
-            {status}
-        </span>
-        """,
-        unsafe_allow_html=True
-    )
-
-def show_feature_coming_soon(feature_name):
-    """Display a 'coming soon' message for features under development."""
-    st.info(f"🚧 **{feature_name}** is coming soon! This feature is currently under development.")
-
-def create_expandable_section(title, content, expanded=False):
-    """Create an expandable section with consistent styling."""
-    with st.expander(title, expanded=expanded):
-        content()
-
-def show_empty_state(message, action_text=None, action_callback=None):
-    """Show an empty state with optional action."""
-    st.markdown(f"""
-    <div style="
-        text-align: center;
-        padding: 3rem;
-        color: #666;
-    ">
-        <div style="font-size: 3rem; margin-bottom: 1rem;">📭</div>
-        <div style="font-size: 1.2rem; margin-bottom: 1rem;">{message}</div>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    if action_text and action_callback:
-        if st.button(action_text, type="primary"):
-            action_callback()
-
-def render_receipt_card(receipt: Receipt, show_edit: bool = False):
-    """Render a receipt card with all details."""
+def safe_render_receipt_card(receipt: Receipt, show_edit: bool = False):
+    """Safely render a receipt card with comprehensive error handling."""
     try:
-        # Create a card-like container
         with st.container():
             # Header with vendor and amount
             col1, col2 = st.columns([3, 1])
             
             with col1:
-                st.markdown(f"### 🏪 {receipt.vendor}")
-                st.markdown(f"**Category:** {receipt.category}")
+                vendor = safe_get_attribute(receipt, 'vendor') or safe_get_attribute(receipt, 'store_name') or 'Unknown Vendor'
+                st.markdown(f"### 🏪 {vendor}")
+                
+                category = safe_get_attribute(receipt, 'category') or 'Other'
+                st.markdown(f"**Category:** {category}")
             
             with col2:
-                st.markdown(f"### 💰 ${receipt.amount:.2f}")
-                st.markdown(f"**{receipt.payment_method}**")
+                amount = safe_get_attribute(receipt, 'amount') or safe_get_attribute(receipt, 'total') or safe_get_attribute(receipt, 'total_amount') or 0
+                st.markdown(f"### 💰 ${float(amount):.2f}")
+                
+                payment_method = safe_get_attribute(receipt, 'payment_method') or 'Unknown'
+                st.markdown(f"**{payment_method}**")
             
             # Date and details
             col1, col2 = st.columns(2)
             
             with col1:
-                st.markdown(f"**📅 Date:** {receipt.transaction_date.strftime('%B %d, %Y')}")
-                if receipt.created_at:
-                    st.markdown(f"**⏰ Added:** {receipt.created_at.strftime('%m/%d/%Y %H:%M')}")
+                transaction_date = safe_get_attribute(receipt, 'transaction_date') or safe_get_attribute(receipt, 'date')
+                if transaction_date and hasattr(transaction_date, 'strftime'):
+                    st.markdown(f"**📅 Date:** {transaction_date.strftime('%B %d, %Y')}")
+                elif transaction_date:
+                    st.markdown(f"**📅 Date:** {transaction_date}")
+                
+                created_at = safe_get_attribute(receipt, 'created_at')
+                if created_at and hasattr(created_at, 'strftime'):
+                    st.markdown(f"**⏰ Added:** {created_at.strftime('%m/%d/%Y %H:%M')}")
             
             with col2:
-                if receipt.items:
+                items = safe_get_attribute(receipt, 'items', [])
+                if items and len(items) > 0:
                     st.markdown("**🛍️ Items:**")
-                    for item in receipt.items[:5]:  # Show first 5 items
+                    for item in items[:5]:  # Show first 5 items
                         st.markdown(f"• {item}")
-                    if len(receipt.items) > 5:
-                        st.markdown(f"• ... and {len(receipt.items) - 5} more items")
+                    if len(items) > 5:
+                        st.markdown(f"• ... and {len(items) - 5} more items")
                 else:
                     st.markdown("**🛍️ Items:** No items listed")
             
             # Receipt ID (small text)
-            st.caption(f"Receipt ID: {receipt.id}")
+            receipt_id = safe_get_attribute(receipt, 'id', 'N/A')
+            st.caption(f"Receipt ID: {receipt_id}")
             
     except Exception as e:
         st.error(f"Error rendering receipt card: {str(e)}")
+        # Fallback display
+        st.markdown("### Receipt")
+        st.markdown("*Error loading receipt details*")
 
-def render_upload_section():
-    """Render the file upload section."""
-    try:
-        st.markdown("### 📤 Upload Receipt Files")
+def show_system_status():
+    """Show system status information"""
+    st.subheader("🔧 System Status")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.write("**Core Components:**")
+        st.write("✅ UI Components" if True else "❌ UI Components")
+        st.write("✅ Database" if DatabaseManager else "❌ Database")
+        st.write("✅ Text Extraction" if TextExtractor else "❌ Text Extraction")
+        st.write("✅ Charts" if PLOTLY_AVAILABLE else "❌ Charts")
+    
+    with col2:
+        st.write("**Python Packages:**")
+        st.write("✅ Streamlit" if True else "❌ Streamlit")
+        st.write("✅ Pandas" if True else "❌ Pandas")
         
-        uploaded_files = st.file_uploader(
-            "Choose receipt files",
-            type=['pdf', 'png', 'jpg', 'jpeg'],
-            accept_multiple_files=True,
-            help="Upload PDF files or images (PNG, JPG, JPEG) of your receipts"
-        )
+        try:
+            import plotly
+            st.write("✅ Plotly")
+        except:
+            st.write("❌ Plotly")
         
-        if uploaded_files:
-            st.success(f"Selected {len(uploaded_files)} file(s) for processing")
-            
-            # Show file details
-            with st.expander("📋 File Details"):
-                for file in uploaded_files:
-                    col1, col2, col3 = st.columns(3)
-                    with col1:
-                        st.write(f"**Name:** {file.name}")
-                    with col2:
-                        st.write(f"**Size:** {file.size / 1024:.1f} KB")
-                    with col3:
-                        st.write(f"**Type:** {file.type}")
-        
-        return uploaded_files
-        
-    except Exception as e:
-        st.error(f"Error in upload section: {str(e)}")
-        return None
+        try:
+            import openpyxl
+            st.write("✅ OpenPyXL")
+        except:
+            st.write("❌ OpenPyXL")
 
-def render_search_filters():
-    """Render search and filter controls."""
-    try:
-        with st.expander("🔍 Search & Filter Options", expanded=True):
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                search_query = st.text_input(
-                    "Search receipts",
-                    placeholder="Enter vendor name, item, or amount...",
-                    help="Search across vendor names, items, and amounts"
-                )
-                
-                date_range = st.date_input(
-                    "Date Range",
-                    value=(),
-                    help="Select start and end dates"
-                )
-            
-            with col2:
-                amount_range = st.slider(
-                    "Amount Range ($)",
-                    min_value=0.0,
-                    max_value=1000.0,
-                    value=(0.0, 1000.0),
-                    step=1.0
-                )
-                
-                category_filter = st.selectbox(
-                    "Category",
-                    options=["All", "Food & Dining", "Groceries", "Shopping", 
-                            "Transportation", "Entertainment", "Healthcare", 
-                            "Utilities", "Services", "Other"],
-                    index=0
-                )
+def create_diagnostic_info():
+    """Create diagnostic information for troubleshooting"""
+    with st.expander("🔍 Diagnostic Information"):
+        st.write("**System Information:**")
+        st.write(f"- Streamlit version: {st.__version__}")
+        st.write(f"- Python version: {os.sys.version}")
+        st.write(f"- Current working directory: {os.getcwd()}")
         
-        return {
-            'search_query': search_query,
-            'date_range': date_range,
-            'amount_range': amount_range,
-            'category_filter': category_filter
+        st.write("**Available Modules:**")
+        modules_status = {
+            "DatabaseManager": DatabaseManager is not None,
+            "TextExtractor": TextExtractor is not None,
+            "Plotly": PLOTLY_AVAILABLE,
+            "Pandas": True,
         }
         
-    except Exception as e:
-        st.error(f"Error rendering search filters: {str(e)}")
-        return {}
+        for module, status in modules_status.items():
+            status_icon = "✅" if status else "❌"
+            st.write(f"- {module}: {status_icon}")
+        
+        st.write("**Session State Keys:**")
+        for key in st.session_state.keys():
+            st.write(f"- {key}: {type(st.session_state[key])}")
 
-def render_bulk_actions(selected_receipts: List[Receipt]):
-    """Render bulk action controls."""
-    try:
-        if not selected_receipts:
-            return
-        
-        st.markdown(f"### 🔧 Bulk Actions ({len(selected_receipts)} selected)")
-        
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            if st.button("🗑️ Delete Selected", type="secondary"):
-                st.warning("This will delete all selected receipts. This action cannot be undone.")
-                if st.button("Confirm Delete", type="primary"):
-                    # Implement bulk delete
-                    st.success(f"Deleted {len(selected_receipts)} receipts")
-        
-        with col2:
-            new_category = st.selectbox(
-                "Change Category",
-                options=["Food & Dining", "Groceries", "Shopping", 
-                        "Transportation", "Entertainment", "Healthcare", 
-                        "Utilities", "Services", "Other"]
-            )
-            if st.button("📝 Update Category"):
-                # Implement bulk category update
-                st.success(f"Updated category for {len(selected_receipts)} receipts")
-        
-        with col3:
-            if st.button("📥 Export Selected"):
-                # Implement export functionality
-                st.success("Export functionality coming soon!")
-                
-    except Exception as e:
-        st.error(f"Error rendering bulk actions: {str(e)}")
+def initialize_session_state():
+    """Initialize session state with safe defaults"""
+    if 'receipts' not in st.session_state:
+        st.session_state.receipts = []
+    
+    if 'db' not in st.session_state:
+        if DatabaseManager:
+            try:
+                st.session_state.db = DatabaseManager()
+            except Exception as e:
+                st.error(f"Failed to initialize database: {str(e)}")
+                st.session_state.db = None
+        else:
+            st.session_state.db = None
+    
+    if 'upload_history' not in st.session_state:
+        st.session_state.upload_history = []
+    
+    if 'filter_settings' not in st.session_state:
+        st.session_state.filter_settings = {}
 
-def render_analytics_summary(analytics_data: dict):
-    """Render analytics summary cards."""
-    try:
-        if not analytics_data:
-            st.info("No analytics data available")
-            return
-        
-        st.markdown("### 📊 Analytics Summary")
-        
-        col1, col2, col3, col4 = st.columns(4)
-        
-        basic_stats = analytics_data.get('basic_stats', {})
-        
-        with col1:
-            st.metric(
-                "Total Receipts",
-                basic_stats.get('total_receipts', 0)
-            )
-        
-        with col2:
-            st.metric(
-                "Total Amount",
-                f"${basic_stats.get('total_amount', 0):.2f}"
-            )
-        
-        with col3:
-            st.metric(
-                "Average Amount",
-                f"${basic_stats.get('average_amount', 0):.2f}"
-            )
-        
-        with col4:
-            st.metric(
-                "Unique Vendors",
-                basic_stats.get('unique_vendors', 0)
-            )
-        
-    except Exception as e:
-        st.error(f"Error rendering analytics summary: {str(e)}")
-
-def render_error_message(error: str, details: Optional[str] = None):
-    """Render a formatted error message."""
-    try:
-        st.error(f"❌ {error}")
-        
-        if details:
-            with st.expander("Error Details"):
-                st.code(details)
-                
-    except Exception as e:
-        st.error(f"Error rendering error message: {str(e)}")
-
-def render_success_message(message: str, details: Optional[str] = None):
-    """Render a formatted success message."""
-    try:
-        st.success(f"✅ {message}")
-        
-        if details:
-            st.info(details)
-            
-    except Exception as e:
-        st.error(f"Error rendering success message: {str(e)}")
-
-def render_loading_spinner(message: str = "Loading..."):
-    """Render a loading spinner with message."""
-    try:
-        return st.spinner(message)
-        
-    except Exception as e:
-        st.error(f"Error rendering loading spinner: {str(e)}")
-        return None
-
-def render_confirmation_dialog(message: str, key: str):
-    """Render a confirmation dialog."""
-    try:
-        st.warning(message)
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            confirm = st.button("✅ Confirm", key=f"confirm_{key}", type="primary")
-        
-        with col2:
-            cancel = st.button("❌ Cancel", key=f"cancel_{key}")
-        
-        return confirm, cancel
-        
-    except Exception as e:
-        st.error(f"Error rendering confirmation dialog: {str(e)}")
-        return False, False
-
-def render_data_table(data: List[dict], title: str = "Data Table"):
-    """Render a data table with sorting and filtering."""
-    try:
-        if not data:
-            st.info("No data to display")
-            return
-        
-        st.markdown(f"### {title}")
-        
-        # Convert to DataFrame for better display
-        df = pd.DataFrame(data)
-        
-        # Add search functionality
-        search_term = st.text_input(f"Search {title.lower()}", key=f"search_{title}")
-        
-        if search_term:
-            # Simple text search across all columns
-            mask = df.astype(str).apply(lambda x: x.str.contains(search_term, case=False, na=False)).any(axis=1)
-            df = df[mask]
-        
-        # Display the table
-        st.dataframe(df, use_container_width=True)
-        
-        # Show row count
-        st.caption(f"Showing {len(df)} rows")
-        
-    except Exception as e:
-        st.error(f"Error rendering data table: {str(e)}")
-
-def create_upload_widget(
-    label: str = "Upload Receipt Files",
-    file_types: List[str] = None,
-    multiple: bool = True,
-    help_text: str = None
-) -> Optional[List]:
-    """Create a standardized file upload widget"""
-    if file_types is None:
-        file_types = ['png', 'jpg', 'jpeg', 'pdf']
-    
-    if help_text is None:
-        help_text = "Upload images or PDF files of your receipts"
-    
-    return st.file_uploader(
-        label,
-        type=file_types,
-        accept_multiple_files=multiple,
-        help=help_text
-    )
-
-def create_analytics_chart(
-    chart_type: str,
-    data: Dict[str, Any],
-    title: str,
-    **kwargs
-) -> go.Figure:
-    """Create standardized analytics charts"""
-    
-    if chart_type == "line":
-        fig = px.line(
-            x=data.get('x', []),
-            y=data.get('y', []),
-            title=title,
-            **kwargs
-        )
-    
-    elif chart_type == "bar":
-        fig = px.bar(
-            x=data.get('x', []),
-            y=data.get('y', []),
-            title=title,
-            **kwargs
-        )
-    
-    elif chart_type == "pie":
-        fig = px.pie(
-            values=data.get('values', []),
-            names=data.get('names', []),
-            title=title,
-            **kwargs
-        )
-    
-    elif chart_type == "scatter":
-        fig = px.scatter(
-            x=data.get('x', []),
-            y=data.get('y', []),
-            title=title,
-            **kwargs
-        )
-    
-    else:
-        # Default to bar chart
-        fig = px.bar(
-            x=data.get('x', []),
-            y=data.get('y', []),
-            title=title,
-            **kwargs
-        )
-    
-    # Common styling
-    fig.update_layout(
-        font=dict(size=12),
-        title_font_size=16,
-        showlegend=True if chart_type == "pie" else False
-    )
-    
-    return fig
-
-def create_filter_sidebar(
-    receipts: List,
-    show_search: bool = True,
-    show_date_filter: bool = True,
-    show_amount_filter: bool = True,
-    show_merchant_filter: bool = True,
-    show_category_filter: bool = True
-) -> Dict[str, Any]:
-    """Create a standardized filter sidebar"""
-    filters = {}
-    
-    st.sidebar.header("🔧 Filters")
-    
-    if show_search:
-        filters['search_query'] = st.sidebar.text_input(
-            "🔍 Search",
-            placeholder="Enter merchant, item, or any text..."
-        )
-    
-    if show_date_filter:
-        st.sidebar.subheader("📅 Date Range")
-        col1, col2 = st.sidebar.columns(2)
-        
-        with col1:
-            filters['start_date'] = st.date_input(
-                "From",
-                value=datetime.now().replace(day=1),  # Start of current month
-                max_value=datetime.now()
-            )
-        
-        with col2:
-            filters['end_date'] = st.date_input(
-                "To",
-                value=datetime.now(),
-                max_value=datetime.now()
-            )
-    
-    if show_amount_filter and receipts:
-        st.sidebar.subheader("💰 Amount Range")
-        max_amount = max(r.total_amount for r in receipts if r.total_amount) or 100.0
-        filters['amount_range'] = st.sidebar.slider(
-            "Amount ($)",
-            min_value=0.0,
-            max_value=float(max_amount),
-            value=(0.0, float(max_amount)),
-            step=0.01
-        )
-    
-    if show_merchant_filter and receipts:
-        st.sidebar.subheader("🏪 Merchant")
-        merchants = sorted(set(r.merchant_name for r in receipts if r.merchant_name))
-        filters['selected_merchants'] = st.sidebar.multiselect(
-            "Select merchants",
-            options=merchants,
-            default=[]
-        )
-    
-    if show_category_filter and receipts:
-        st.sidebar.subheader("📂 Category")
-        categories = sorted(set(r.category for r in receipts if r.category))
-        filters['selected_categories'] = st.sidebar.multiselect(
-            "Select categories",
-            options=categories,
-            default=[]
-        )
-    
-    return filters
-
-def create_progress_indicator(current: int, total: int, label: str = "Progress") -> None:
-    """Create a progress indicator"""
-    progress = current / total if total > 0 else 0
-    st.progress(progress, text=f"{label}: {current}/{total} ({progress*100:.1f}%)")
-
-def create_export_button(
-    data: Any,
-    filename: str,
-    file_format: str = "csv",
-    label: str = "Export Data"
-) -> None:
-    """Create an export button for data"""
-    
-    if file_format.lower() == "csv" and isinstance(data, pd.DataFrame):
-        csv_data = data.to_csv(index=False)
-        st.download_button(
-            label=f"📥 {label}",
-            data=csv_data,
-            file_name=f"{filename}.csv",
-            mime="text/csv"
-        )
-    
-    elif file_format.lower() == "json":
-        import json
-        json_data = json.dumps(data, indent=2, default=str)
-        st.download_button(
-            label=f"📥 {label}",
-            data=json_data,
-            file_name=f"{filename}.json",
-            mime="application/json"
-        )
-    
-    else:
-        st.error(f"Unsupported export format: {file_format}")
+# Export the key functions that the main app needs
+__all__ = [
+    'apply_custom_css',
+    'create_sidebar',
+    'display_receipt_card',
+    'create_metrics_row',
+    'create_spending_chart',
+    'display_error_message',
+    'display_success_message',
+    'display_warning_message',
+    'display_info_message',
+    'create_upload_area',
+    'process_quick_upload',
+    'safe_render_receipt_card',
+    'show_system_status',
+    'initialize_session_state',
+    'create_diagnostic_info',
+    'safe_get_attribute'
+]
