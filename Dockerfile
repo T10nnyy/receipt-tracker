@@ -107,4 +107,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:${PORT:-8501}/_stcore/health || exit 1
 
 # Use the startup script as default command
-CMD ["./start.sh"]
+CMD sh -c 'unset STREAMLIT_SERVER_PORT && streamlit run src/app.py --server.port ${PORT:-8501} --server.address 0.0.0.0 --server.headless true'
